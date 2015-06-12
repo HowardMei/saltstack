@@ -3895,6 +3895,7 @@ def manage_file(name,
                 ret,
                 source,
                 source_sum,
+                skip_verify=False,
                 user,
                 group,
                 mode,
@@ -3998,6 +3999,9 @@ def manage_file(name,
             #  verify that it matches the intended sum value
             if _urlparse(source).scheme not in ('salt', ''):
                 dl_sum = get_hash(sfn, source_sum['hash_type'])
+                # Skip the checksum verification by presetting a simple hash value
+                if skip_verify:
+                    source_sum['hsum'] = dl_sum
                 if dl_sum != source_sum['hsum']:
                     ret['comment'] = ('File sum set for file {0} of {1} does '
                                       'not match real sum of {2}'
@@ -4090,7 +4094,13 @@ def manage_file(name,
             # If the downloaded file came from a non salt server source verify
             # that it matches the intended sum value
             if _urlparse(source).scheme != 'salt':
+                # Skip the checksum verification by presetting a simple hash_type
+                if skip_verify:
+                    source_sum['hash_type'] = 'md5'
                 dl_sum = get_hash(sfn, source_sum['hash_type'])
+                # Skip the checksum verification by presetting a simple hash value
+                if skip_verify:
+                    source_sum['hsum'] = dl_sum
                 if dl_sum != source_sum['hsum']:
                     ret['comment'] = ('File sum set for file {0} of {1} does '
                                       'not match real sum of {2}'
