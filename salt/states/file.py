@@ -1064,6 +1064,7 @@ def missing(name):
 def managed(name,
             source=None,
             source_hash='',
+            skip_verify=False,
             user=None,
             group=None,
             mode=None,
@@ -1195,6 +1196,17 @@ def managed(name,
                     - source: https://launchpad.net/tomdroid/beta/0.7.3/+download/tomdroid-src-0.7.3.tar.gz
                     - source_hash: https://launchpad.net/tomdroid/beta/0.7.3/+download/tomdroid-src-0.7.3.tar.gz/+md5
 
+    skip_verify
+        Skip the source hash/checksum verification step to avoid warning
+            example:
+
+            .. code-block:: yaml
+
+                tomdroid-src-0.7.3.tar.gz:
+                  file.managed:
+                    - name: /tmp/tomdroid-src-0.7.3.tar.gz
+                    - source: https://launchpad.net/tomdroid/beta/0.7.3/+download/tomdroid-src-0.7.3.tar.gz
+                    - skip_verify: True
 
     user
         The user to own the file, this defaults to the user salt is running as
@@ -1508,6 +1520,7 @@ def managed(name,
                 ret,
                 source,
                 source_sum,
+                skip_verify,
                 user,
                 group,
                 mode,
@@ -1564,6 +1577,7 @@ def managed(name,
                 ret,
                 source,
                 source_sum,
+                skip_verify,
                 user,
                 group,
                 mode,
