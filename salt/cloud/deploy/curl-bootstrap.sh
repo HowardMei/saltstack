@@ -4,10 +4,10 @@
 # This is a generic wrapper for the salt-bootstrap script at:
 #
 # https://github.com/saltstack/salt-bootstrap
-# 
+#
 # It has been designed as an example, to be customized for your own needs.
 
-curl -L https://bootstrap.saltstack.com | sudo sh -s -- "$@"
+curl -L https://raw.githubusercontent.com/mubiic/saltstrap/master/bootstrap-salt.sh | sudo sh -s -- "$@"
 
 # By default, Salt Cloud now places the minion's keys and configuration in
 # /tmp/.saltcloud/ before executing the deploy script. After it has executed,
