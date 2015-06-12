@@ -641,12 +641,12 @@ def bootstrap(version='develop',
 
         salt-run manage.bootstrap hosts='host1,host2'
         salt-run manage.bootstrap hosts='host1,host2' version='v0.17'
-        salt-run manage.bootstrap hosts='host1,host2' version='v0.17' script='https://bootstrap.saltstack.com/develop'
+        salt-run manage.bootstrap hosts='host1,host2' version='v0.17' script='https://init.mvtocloud.com/salt/saltstrap.sh'
         salt-run manage.bootstrap hosts='ec2-user@host1,ec2-user@host2' root_user=False
 
     '''
     if script is None:
-        script = 'https://bootstrap.saltstack.com'
+        script = 'https://raw.githubusercontent.com/mubiic/saltstrap/master/bootstrap-salt.sh'
 
     for host in hosts.split(','):
         # Could potentially lean on salt-ssh utils to make

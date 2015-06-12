@@ -56,7 +56,7 @@ BOOTSTRAP_SCRIPT_DISTRIBUTED_VERSION = os.environ.get(
     'BOOTSTRAP_SCRIPT_VERSION',
     # If no bootstrap-script version was provided from the environment, let's
     # provide the one we define.
-    'v2014.06.21'
+    'master'
 )
 
 # Store a reference to the executing platform
@@ -242,7 +242,7 @@ class CloudSdist(Sdist):
             # Let's update the bootstrap-script to the version defined to be
             # distributed. See BOOTSTRAP_SCRIPT_DISTRIBUTED_VERSION above.
             url = (
-                'https://github.com/saltstack/salt-bootstrap/raw/{0}'
+                'https://raw.githubusercontent.com/mubiic/saltstrap/{0}'
                 '/bootstrap-salt.sh'.format(
                     BOOTSTRAP_SCRIPT_DISTRIBUTED_VERSION
                 )

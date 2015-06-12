@@ -2495,7 +2495,7 @@ def update_bootstrap(config, url=None):
 
     '''
     default_url = config.get('bootstrap_script_url',
-                             'https://bootstrap.saltstack.com')
+                             'https://raw.githubusercontent.com/mubiic/saltstrap/master/bootstrap-salt.sh')
     if not url:
         url = default_url
     if not url:
