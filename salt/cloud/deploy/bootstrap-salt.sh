@@ -19,6 +19,13 @@
 set -o nounset                              # Treat unset variables as an error
 __ScriptVersion="2015.08.06"
 __ScriptName="bootstrap-salt.sh"
+__ScriptVersion="v${__ScriptVersion}/Mubiic-r2015.08.05"
+__GPG_KEY_URLFILE="http://debian.saltstack.com/debian-salt-team-joehealy.gpg.key"
+__CUSTOM_REPO_NAME="saltstack/salt"
+__CUSTOM_REPO_PATH="github.com/${__CUSTOM_REPO_NAME}"
+__CUSTOM_RAW_URLPATH="raw.githubusercontent.com/${__CUSTOM_REPO_NAME}"
+__GET_PIP_URLFILE="https://bootstrap.pypa.io/get-pip.py"
+
 
 #======================================================================================================================
 #  Environment variables taken into account.
@@ -180,7 +187,7 @@ __check_config_dir() {
 #----------------------------------------------------------------------------------------------------------------------
 _KEEP_TEMP_FILES=${BS_KEEP_TEMP_FILES:-$BS_FALSE}
 _TEMP_CONFIG_DIR="null"
-_SALTSTACK_REPO_URL="git://github.com/saltstack/salt.git"
+_SALTSTACK_REPO_URL="https://${__CUSTOM_REPO_PATH}.git"
 _SALT_REPO_URL=${_SALTSTACK_REPO_URL}
 _TEMP_KEYS_DIR="null"
 _INSTALL_MASTER=$BS_FALSE
@@ -207,9 +214,10 @@ _SALT_MASTER_ADDRESS=${BS_SALT_MASTER_ADDRESS:-null}
 _SALT_MINION_ID="null"
 # __SIMPLIFY_VERSION is mostly used in Solaris based distributions
 __SIMPLIFY_VERSION=$BS_TRUE
-_LIBCLOUD_MIN_VERSION="0.14.0"
+_LIBCLOUD_MIN_VERSION="0.16.0"
 _PY_REQUESTS_MIN_VERSION="2.0"
-_EXTRA_PACKAGES=""
+_EXTRA_PACKAGES="git ca-certificates"
+_BASE_PIP_PACKAGES="virtualenv pss gitpython pew apache-libcloud msgpack-python docker-py docker-compose"
 _HTTP_PROXY=""
 _DISABLE_SALT_CHECKS=$BS_FALSE
 __SALT_GIT_CHECKOUT_DIR=${BS_SALT_GIT_CHECKOUT_DIR:-/tmp/git/salt}
@@ -241,19 +249,23 @@ usage() {
     - ${__ScriptName} git develop
     - ${__ScriptName} git v0.17.0
     - ${__ScriptName} git 8c3fadf15ec183e5ce8c63739850d543617e4357
+    - ${__ScriptName} -D -d /tmp/mysalt -g mubiic/mysalt -G -P -M -F -L -i mynode git v2015.5.2
+    - ${__ScriptName} -D -d /tmp/mysalt -g https://github.com/mubiicsrc/mysalt.git -P -M -F -L -i mynode git v2015.5.2
+    - ${__ScriptName} -D -d /tmp/mysalt -g git://user:pass@bitbucket.org/mubiicsrc/mysalt.git -P -M -F -L -i mynode git v2015.5.2
 
-  Options:
+  Options (put multi opts in a line as following order, wrong orders will lead to errors):
   -h  Display this message
   -v  Display script version
   -n  No colours.
   -D  Show debug output.
   -c  Temporary configuration directory
-  -g  Salt repository URL. (default: git://github.com/saltstack/salt.git)
-  -G  Instead of cloning from git://github.com/saltstack/salt.git, clone from https://github.com/saltstack/salt.git (Usually necessary on systems which have the regular git protocol port blocked, where https usually is not)
+  -t  Target git checkout path for Salt. (Default:__SALT_GIT_CHECKOUT_DIR = /tmp/git/salt)
+  -g  Salt repository URL. (Default: https://${__CUSTOM_REPO_PATH}.git) or Github repo name with -G option
+  -G  Use Github as repository domain name when -g option is a repo name like: saltstack/salt
   -k  Temporary directory holding the minion keys which will pre-seed
       the master.
   -s  Sleep time used when waiting for daemons to start, restart and when checking
-      for the services running. Default: ${__DEFAULT_SLEEP}
+      for the services running. (Default: ${__DEFAULT_SLEEP})
   -M  Also install salt-master
   -S  Also install salt-syndic
   -N  Do not install salt-minion
@@ -288,13 +300,13 @@ EOT
 }   # ----------  end of function usage  ----------
 
 
+
 while getopts ":hvnDc:Gg:k:MSNXCPFUKIA:i:Lp:dH:Z" opt
 do
   case "${opt}" in
 
     h )  usage; exit 0                                  ;;
 
-    v )  echo "$0 -- Version $__ScriptVersion"; exit 0  ;;
     n )  _COLORS=0; __detect_color_support              ;;
     D )  _ECHO_DEBUG=$BS_TRUE                           ;;
     c )  _TEMP_CONFIG_DIR=$(__check_config_dir "$OPTARG")
@@ -308,12 +320,29 @@ do
              exit 1
          fi
          ;;
-    g ) _SALT_REPO_URL=$OPTARG                          ;;
-    G ) if [ "${_SALT_REPO_URL}" = "${_SALTSTACK_REPO_URL}" ]; then
-            _SALTSTACK_REPO_URL="https://github.com/saltstack/salt.git"
-            _SALT_REPO_URL=${_SALTSTACK_REPO_URL}
+    t ) __SALT_GIT_CHECKOUT_DIR="$OPTARG"               ;;
+    g ) _SALT_REPO_URL="$OPTARG"
+        if echo "${_SALT_REPO_URL}" | grep -iq "github.com"; then
+            __CUSTOM_REPO_NAME="$(echo ${_SALT_REPO_URL} | awk -F'github.com/' '{print $NF}' 2>/dev/null | awk -F/ '{print $1"/"$2}' 2>/dev/null | sed 's/\.git$//' 2>/dev/null)"
+            __CUSTOM_REPO_PATH="github.com/${__CUSTOM_REPO_NAME}"
+            __CUSTOM_RAW_URLPATH="raw.githubusercontent.com/${__CUSTOM_REPO_NAME}"
         else
-            _SALTSTACK_REPO_URL="https://github.com/saltstack/salt.git"
+            # No github.com detected in url, and bitbucket has a hashed raw url, so let's use the official repo conf files
+            # if this is a repo name of github.com, please turn on -G option too
+            __CUSTOM_REPO_PATH="github.com/saltstack/salt"
+            __CUSTOM_RAW_URLPATH="raw.githubusercontent.com/saltstack/salt"
+        fi
+         ;;
+    G ) echowarn "-G after -g means treat -g option value as the github.com repo name and adjust official raw path accordingly." >&2
+        if [ "$(echo ${_SALT_REPO_URL} | awk -F/ '{print NF-1}')" -eq 1 ]; then
+            __CUSTOM_REPO_NAME="$(echo ${_SALT_REPO_URL} | sed 's/\.git$//' 2>/dev/null)"
+            __CUSTOM_REPO_PATH="github.com/${__CUSTOM_REPO_NAME}"
+            _SALT_REPO_URL="https://github.com/${__CUSTOM_REPO_NAME}.git"
+            __CUSTOM_RAW_URLPATH="raw.githubusercontent.com/${__CUSTOM_REPO_NAME}"
+        else
+            echoerror "-g option value ${_SALT_REPO_URL} has a illegal format, please use a saltstack/salt style repo name from github.com"
+            echoerror "Or check if the -g option is set before -G because opts order matters here. Type ${0} -h for details."
+            exit 1
         fi
          ;;
     k )  _TEMP_KEYS_DIR="$OPTARG"
@@ -333,15 +362,20 @@ do
     U )  _UPGRADE_SYS=$BS_TRUE                          ;;
     K )  _KEEP_TEMP_FILES=$BS_TRUE                      ;;
     I )  _INSECURE_DL=$BS_TRUE                          ;;
-    A )  _SALT_MASTER_ADDRESS=$OPTARG                   ;;
-    i )  _SALT_MINION_ID=$OPTARG                        ;;
+    A )  _SALT_MASTER_ADDRESS="$OPTARG"                   ;;
+    i )  _SALT_MINION_ID="$OPTARG"                        ;;
     L )  _INSTALL_CLOUD=$BS_TRUE                        ;;
     p )  _EXTRA_PACKAGES="$_EXTRA_PACKAGES $OPTARG"     ;;
     d )  _DISABLE_SALT_CHECKS=$BS_TRUE                  ;;
     H )  _HTTP_PROXY="$OPTARG"                          ;;
     Z)   _ENABLE_EXTERNAL_ZMQ_REPOS=$BS_TRUE            ;;
 
-
+    v ) echoinfo "To bootstrap ${_SALT_REPO_URL} w/ other options"
+        echoinfo "by ${0} -- Version ${__ScriptVersion}"
+        echoinfo "with raw conf from: https://${__CUSTOM_REPO_PATH}/raw"
+        echoinfo "and from https://${__CUSTOM_RAW_URLPATH}"
+         exit 0
+         ;;
     \?)  echo
          echoerror "Option does not exist : $OPTARG"
          usage
@@ -472,13 +506,17 @@ if [ "${CALLER}x" = "${0}x" ]; then
     CALLER="PIPED THROUGH"
 fi
 
+
 # Work around for 'Docker + salt-bootstrap failure' https://github.com/saltstack/salt-bootstrap/issues/394
 if [ ${_DISABLE_SALT_CHECKS} -eq 0 ]; then
     [ -f /tmp/disable_salt_checks ] && _DISABLE_SALT_CHECKS=$BS_TRUE && \
         echowarn "Found file: /tmp/disable_salt_checks, setting \$_DISABLE_SALT_CHECKS=true"
 fi
 
-echoinfo "${CALLER} ${0} -- Version ${__ScriptVersion}"
+echoinfo "Bootstrap ${_SALT_REPO_URL} ${ITYPE} ${GIT_REV}"
+echoinfo "by ${CALLER} ${0} -- Version ${__ScriptVersion}"
+echoinfo "with raw conf from: https://${__CUSTOM_REPO_PATH}/raw"
+echoinfo "and from https://${__CUSTOM_RAW_URLPATH}"
 #echowarn "Running the unstable version of ${__ScriptName}"
 
 #---  FUNCTION  -------------------------------------------------------------------------------------------------------
@@ -1270,11 +1308,11 @@ __git_clone_and_checkout() {
             cd "${__SALT_GIT_CHECKOUT_DIR}"
         fi
 
-        if [ "$(echo "$_SALT_REPO_URL" | grep -c -e '\(\(git\|https\)://github\.com/\|git@github\.com:\)saltstack/salt\.git')" -eq 0 ]; then
+        if [ -z "$(git tag -l 2>/dev/null)" ]; then
             # We need to add the saltstack repository as a remote and fetch tags for proper versioning
-            echoinfo "Adding SaltStack's Salt repository as a remote"
+            echoinfo "Adding ${__CUSTOM_REPO_PATH}'s Salt repository as a remote"
             git remote add upstream "$_SALTSTACK_REPO_URL" || return 1
-            echodebug "Fetching upstream(SaltStack's Salt repository) git tags"
+            echodebug "Fetching upstream(${__CUSTOM_REPO_PATH}'s Salt repository) git tags"
             git fetch --tags upstream || return 1
         fi
 
@@ -1315,7 +1353,7 @@ __check_end_of_life_versions() {
 
     case "${DISTRO_NAME_L}" in
         debian)
-            # Debian versions below 6 are not supported
+            # Debian versions bellow 6 are not supported
             if [ "$DISTRO_MAJOR_VERSION" -lt 6 ]; then
                 echoerror "End of life distributions are not supported."
                 echoerror "Please consider upgrading to the next stable. See:"
@@ -1784,6 +1822,17 @@ install_ubuntu_deps() {
             echoinfo "Installing ZMQ>=4/PyZMQ>=14 from Chris Lea's PPA repository"
             add-apt-repository -y ppa:chris-lea/zeromq || return 1
         fi
+        
+        __apt_get_install_noinput python-requests
+        __PIP_PACKAGES=""
+    else
+        check_pip_allowed "You need to allow pip based installations (-P) in order to install the python package 'requests'"
+        [ -f get-pip.py ] && python get-pip.py || wget $_WGET_ARGS -q ${__GET_PIP_URLFILE} -O - | python
+        pip install --upgrade ${_BASE_PIP_PACKAGES}
+        #__apt_get_install_noinput python-setuptools python-pip
+        # shellcheck disable=SC2089
+        __PIP_PACKAGES="requests>=$_PY_REQUESTS_MIN_VERSION"
+
     fi
 
     # Additionally install procps and pciutils which allows for Docker boostraps. See 366#issuecomment-39666813
@@ -1793,10 +1842,16 @@ install_ubuntu_deps() {
     if [ "$_INSTALL_CLOUD" -eq $BS_TRUE ]; then
         check_pip_allowed "You need to allow pip based installations (-P) in order to install 'apache-libcloud'"
         if [ "$(which pip)" = "" ]; then
+
             __PACKAGES="${__PACKAGES} python-setuptools python-pip"
+
+            [ -f get-pip.py ] && python get-pip.py || wget $_WGET_ARGS -q ${__GET_PIP_URLFILE} -O - | python
+            #__apt_get_install_noinput python-pip
+
         fi
+        pip install --upgrade ${_BASE_PIP_PACKAGES}
         # shellcheck disable=SC2089
-        __PIP_PACKAGES="${__PIP_PACKAGES} 'apache-libcloud>=$_LIBCLOUD_MIN_VERSION'"
+        __PIP_PACKAGES="${__PIP_PACKAGES} apache-libcloud>=$_LIBCLOUD_MIN_VERSION"
     fi
 
     apt-get update
@@ -2099,15 +2154,17 @@ install_debian_deps() {
         # Additionally install procps and pciutils which allows for Docker boostraps. See 366#issuecomment-39666813
         __PACKAGES="${__PACKAGES} python-pip"
         # shellcheck disable=SC2089
-        __PIP_PACKAGES="${__PIP_PACKAGES} 'requests>=$_PY_REQUESTS_MIN_VERSION'"
+        __PIP_PACKAGES="${__PIP_PACKAGES} requests>=$_PY_REQUESTS_MIN_VERSION"
     fi
 
     # shellcheck disable=SC2086
     __apt_get_install_noinput ${__PACKAGES} || return 1
+    [ -f get-pip.py ] && python get-pip.py || wget $_WGET_ARGS -q ${__GET_PIP_URLFILE} -O - | python
+    pip install --upgrade ${_BASE_PIP_PACKAGES}
 
     if [ "$_INSTALL_CLOUD" -eq $BS_TRUE ]; then
         # shellcheck disable=SC2089
-        __PIP_PACKAGES="${__PIP_PACKAGES} 'apache-libcloud>=$_LIBCLOUD_MIN_VERSION'"
+        __PIP_PACKAGES="${__PIP_PACKAGES} apache-libcloud>=$_LIBCLOUD_MIN_VERSION"
     fi
 
     if [ "${__PIP_PACKAGES}" != "" ]; then
@@ -2149,7 +2206,12 @@ install_debian_6_deps() {
     fi
 
     # shellcheck disable=SC2086
-    wget $_WGET_ARGS -q http://debian.saltstack.com/debian-salt-team-joehealy.gpg.key -O - | apt-key add - || return 1
+    if [ -f "debian-salt-team-joehealy.gpg.key" ];then
+        cat "debian-salt-team-joehealy.gpg.key" | apt-key add - || return 1
+    else
+        # shellcheck disable=SC2086
+        wget $_WGET_ARGS -q ${__GPG_KEY_URLFILE} -O - | apt-key add - || return 1
+    fi
 
     if [ "$_PIP_ALLOWED" -eq $BS_TRUE ]; then
         echowarn "PyZMQ will be installed from PyPI in order to compile it against ZMQ3"
@@ -2180,6 +2242,8 @@ _eof
         __apt_get_install_noinput -t unstable dpkg liblzma5 python mime-support || return 1
         __apt_get_install_noinput -t unstable libzmq3 libzmq3-dev || return 1
         __apt_get_install_noinput build-essential python-dev python-pip python-setuptools || return 1
+        [ -f get-pip.py ] && python get-pip.py || wget $_WGET_ARGS -q ${__GET_PIP_URLFILE} -O - | python
+        pip install --upgrade ${_BASE_PIP_PACKAGES}
 
         # Saltstack's Unstable Debian repository
         if [ "$(grep -R 'debian.saltstack.com' /etc/apt)" = "" ]; then
@@ -2205,6 +2269,8 @@ _eof
     # Python requests is available through Squeeze backports
     # Additionally install procps and pciutils which allows for Docker boostraps. See 366#issuecomment-39666813
     __apt_get_install_noinput python-pip procps pciutils python-requests
+    [ -f get-pip.py ] && python get-pip.py || wget $_WGET_ARGS -q ${__GET_PIP_URLFILE} -O - | python
+    pip install --upgrade ${_BASE_PIP_PACKAGES}
 
     # Need python-apt for managing packages via Salt
     __apt_get_install_noinput python-apt
@@ -2271,7 +2337,12 @@ install_debian_7_deps() {
     fi
 
     # shellcheck disable=SC2086
-    wget $_WGET_ARGS -q http://debian.saltstack.com/debian-salt-team-joehealy.gpg.key -O - | apt-key add - || return 1
+    if [ -f "debian-salt-team-joehealy.gpg.key" ];then
+        cat "debian-salt-team-joehealy.gpg.key" | apt-key add - || return 1
+    else
+        # shellcheck disable=SC2086
+        wget $_WGET_ARGS -q ${__GPG_KEY_URLFILE} -O - | apt-key add - || return 1
+    fi
 
     apt-get update || return 1
     __apt_get_install_noinput -t wheezy-backports libzmq3 libzmq3-dev python-zmq python-apt || return 1
@@ -2287,6 +2358,8 @@ install_debian_7_deps() {
         __PACKAGES="build-essential python-dev python-pip"
         # shellcheck disable=SC2086
         __apt_get_install_noinput ${__PACKAGES} || return 1
+        [ -f get-pip.py ] && python get-pip.py || wget $_WGET_ARGS -q ${__GET_PIP_URLFILE} -O - | python
+        pip install --upgrade ${_BASE_PIP_PACKAGES}
         check_pip_allowed "You need to allow pip based installations (-P) in order to install apache-libcloud"
         pip install -U "apache-libcloud>=$_LIBCLOUD_MIN_VERSION" || return 1
     fi
@@ -2339,7 +2412,12 @@ install_debian_8_deps() {
     fi
 
     # shellcheck disable=SC2086
-    wget $_WGET_ARGS -q http://debian.saltstack.com/debian-salt-team-joehealy.gpg.key -O - | apt-key add - || return 1
+    if [ -f "debian-salt-team-joehealy.gpg.key" ];then
+        cat "debian-salt-team-joehealy.gpg.key" | apt-key add - || return 1
+    else
+        # shellcheck disable=SC2086
+        wget $_WGET_ARGS -q ${__GPG_KEY_URLFILE} -O - | apt-key add - || return 1
+    fi
 
     apt-get update || return 1
     __apt_get_install_noinput -t jessie-backports libzmq3 libzmq3-dev python-zmq python-requests python-apt || return 1
@@ -2356,6 +2434,8 @@ install_debian_8_deps() {
         __PACKAGES="build-essential python-dev python-pip"
         # shellcheck disable=SC2086
         __apt_get_install_noinput ${__PACKAGES} || return 1
+        [ -f get-pip.py ] && python get-pip.py || wget $_WGET_ARGS -q ${__GET_PIP_URLFILE} -O - | python
+        pip install --upgrade ${_BASE_PIP_PACKAGES}
         pip install -U "apache-libcloud>=$_LIBCLOUD_MIN_VERSION"
     fi
 
@@ -2390,6 +2470,8 @@ install_debian_git_deps() {
 
     __apt_get_install_noinput lsb-release python python-pkg-resources python-crypto \
         python-jinja2 python-m2crypto python-yaml msgpack-python python-pip || return 1
+    [ -f get-pip.py ] && python get-pip.py || wget $_WGET_ARGS -q ${__GET_PIP_URLFILE} -O - | python
+    pip install --upgrade ${_BASE_PIP_PACKAGES}
 
     __git_clone_and_checkout || return 1
 
@@ -2439,6 +2521,8 @@ install_debian_6_git_deps() {
 
         # shellcheck disable=SC2086
         __apt_get_install_noinput ${__PACKAGES} || return 1
+        [ -f get-pip.py ] && python get-pip.py || wget $_WGET_ARGS -q ${__GET_PIP_URLFILE} -O - | python
+        pip install --upgrade ${_BASE_PIP_PACKAGES}
 
         easy_install -U pyzmq Jinja2 || return 1
 
@@ -2913,12 +2997,15 @@ install_centos_stable_deps() {
         yum -y install ${__PACKAGES} --enablerepo=${_EPEL_REPO} || return 1
     fi
 
+    [ -f get-pip.py ] && python get-pip.py || wget $_WGET_ARGS -q ${__GET_PIP_URLFILE} -O - | python
+    pip install --upgrade ${_BASE_PIP_PACKAGES}
+
     if [ "$_INSTALL_CLOUD" -eq $BS_TRUE ]; then
         check_pip_allowed "You need to allow pip based installations (-P) in order to install apache-libcloud"
         if [ "$DISTRO_MAJOR_VERSION" -eq 5 ]; then
             easy_install-2.6 "apache-libcloud>=$_LIBCLOUD_MIN_VERSION"
         else
-            pip install "apache-libcloud>=$_LIBCLOUD_MIN_VERSION"
+            pip install -U "apache-libcloud>=$_LIBCLOUD_MIN_VERSION"
         fi
     fi
 
@@ -3728,9 +3815,6 @@ install_amazon_linux_ami_testing_post() {
 #
 install_arch_linux_stable_deps() {
 
-    echoinfo "Running pacman db upgrade" 
-    pacman-db-upgrade || return 1
-
     if [ ! -f /etc/pacman.d/gnupg ]; then
         pacman-key --init && pacman-key --populate archlinux || return 1
     fi
@@ -4221,12 +4305,12 @@ install_smartos_deps() {
         if [ ! -f "$_SALT_ETC_DIR/minion" ] && [ ! -f "$_TEMP_CONFIG_DIR/minion" ]; then
             # shellcheck disable=SC2086
             curl $_CURL_ARGS -s -o "$_TEMP_CONFIG_DIR/minion" -L \
-                https://raw.githubusercontent.com/saltstack/salt/develop/conf/minion || return 1
+                https://${__CUSTOM_RAW_URLPATH}/develop/conf/minion || return 1
         fi
         if [ ! -f "$_SALT_ETC_DIR/master" ] && [ ! -f $_TEMP_CONFIG_DIR/master ]; then
             # shellcheck disable=SC2086
             curl $_CURL_ARGS -s -o "$_TEMP_CONFIG_DIR/master" -L \
-                https://raw.githubusercontent.com/saltstack/salt/develop/conf/master || return 1
+                https://${__CUSTOM_RAW_URLPATH}/develop/conf/master || return 1
         fi
     fi
 
@@ -4303,7 +4387,7 @@ install_smartos_post() {
             if [ ! -f "$_TEMP_CONFIG_DIR/salt-$fname.xml" ]; then
                 # shellcheck disable=SC2086
                 curl $_CURL_ARGS -s -o "$_TEMP_CONFIG_DIR/salt-$fname.xml" -L \
-                    "https://raw.githubusercontent.com/saltstack/salt/develop/pkg/smartos/salt-$fname.xml"
+                    "https://${__CUSTOM_RAW_URLPATH}/develop/pkg/smartos/salt-$fname.xml"
             fi
             svccfg import "$_TEMP_CONFIG_DIR/salt-$fname.xml"
             if [ "${VIRTUAL_TYPE}" = "global" ]; then
@@ -4658,9 +4742,12 @@ install_suse_11_stable_deps() {
     # shellcheck disable=SC2086,SC2090
     __zypper_install ${__PACKAGES} || return 1
 
+    [ -f get-pip.py ] && python get-pip.py || wget $_WGET_ARGS -q ${__GET_PIP_URLFILE} -O - | python
+    pip install --upgrade ${_BASE_PIP_PACKAGES}
+
     if [ "$SUSE_PATCHLEVEL" -eq 1 ]; then
         # There's no python-PyYaml in SP1, let's install it using pip
-        pip install PyYaml || return 1
+        pip install -U PyYaml || return 1
     fi
 
     # PIP based installs need to copy configuration files "by hand".
@@ -4686,7 +4773,7 @@ install_suse_11_stable_deps() {
                 if [ ! -f "$_SALT_ETC_DIR/$fname" ] && [ ! -f "$_TEMP_CONFIG_DIR/$fname" ]; then
                     # shellcheck disable=SC2086
                     curl $_CURL_ARGS -s -o "$_TEMP_CONFIG_DIR/$fname" -L \
-                        "https://raw.githubusercontent.com/saltstack/salt/develop/conf/$fname" || return 1
+                        "https://${__CUSTOM_RAW_URLPATH}/develop/conf/$fname" || return 1
                 fi
             done
         fi
@@ -4733,7 +4820,7 @@ install_suse_11_stable() {
     else
         # USE_SETUPTOOLS=1 To work around
         # error: option --single-version-externally-managed not recognized
-        USE_SETUPTOOLS=1 pip install salt || return 1
+        USE_SETUPTOOLS=1 pip install -U salt || return 1
     fi
     return 0
 }
@@ -4757,13 +4844,13 @@ install_suse_11_stable_post() {
 
             if [ -f /bin/systemctl ]; then
                 # shellcheck disable=SC2086
-                curl $_CURL_ARGS -L "https://github.com/saltstack/salt/raw/develop/pkg/salt-$fname.service" \
+                curl $_CURL_ARGS -L "https://${__CUSTOM_REPO_PATH}/raw/develop/pkg/salt-$fname.service" \
                     -o "/lib/systemd/system/salt-$fname.service" || return 1
                 continue
             fi
 
             # shellcheck disable=SC2086
-            curl $_CURL_ARGS -L "https://github.com/saltstack/salt/raw/develop/pkg/rpm/salt-$fname" \
+            curl $_CURL_ARGS -L "https://${__CUSTOM_REPO_PATH}/raw/develop/pkg/rpm/salt-$fname" \
                 -o "/etc/init.d/salt-$fname" || return 1
             chmod +x "/etc/init.d/salt-$fname"
 
