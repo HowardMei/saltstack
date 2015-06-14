@@ -1,35 +1,35 @@
 language: python
-
 python:
-  - '2.6'
-  - '2.7'
-
+- '2.6'
+- '2.7'
 before_install:
-  - sudo apt-get update
-  - sudo apt-get install --fix-broken --ignore-missing -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" swig rabbitmq-server ruby python-apt mysql-server libmysqlclient-dev
-  - (git describe && git fetch --tags) || (git remote add upstream git://github.com/saltstack/salt.git && git fetch --tags upstream)
-  - pip install mock
-  - pip install --allow-external http://dl.dropbox.com/u/174789/m2crypto-0.20.1.tar.gz
-  - pip install --upgrade pep8 'pylint<=1.2.0'
-  - pip install --upgrade coveralls
-  - "if [[ $TRAVIS_PYTHON_VERSION == '2.6' ]]; then pip install unittest2 ordereddict; fi"
-  - pip install git+https://github.com/saltstack/salt-testing.git#egg=SaltTesting
-
+- sudo apt-get update
+- sudo apt-get install --fix-broken --ignore-missing -y -o Dpkg::Options::="--force-confdef"
+  -o Dpkg::Options::="--force-confold" swig rabbitmq-server ruby python-apt mysql-server
+  libmysqlclient-dev
+- (git describe && git fetch --tags) || (git remote add upstream git://github.com/saltstack/salt.git
+  && git fetch --tags upstream)
+- pip install mock
+- pip install --allow-external http://dl.dropbox.com/u/174789/m2crypto-0.20.1.tar.gz
+- pip install --upgrade pep8 'pylint<=1.2.0'
+- pip install --upgrade coveralls
+- if [[ $TRAVIS_PYTHON_VERSION == '2.6' ]]; then pip install unittest2 ordereddict;
+  fi
+- pip install git+https://github.com/saltstack/salt-testing.git#egg=SaltTesting
 install:
-  - pip install -r requirements/zeromq.txt -r requirements/cloud.txt
-  - pip install --allow-all-external -r requirements/opt.txt
-
+- pip install -r requirements/zeromq.txt -r requirements/cloud.txt
+- pip install --allow-all-external -r requirements/opt.txt
 before_script:
-  - "/home/travis/virtualenv/python${TRAVIS_PYTHON_VERSION}/bin/pylint --rcfile=.testing.pylintrc salt/ && echo 'Finished Pylint Check Cleanly' || echo 'Finished Pylint Check With Errors'"
-  - "/home/travis/virtualenv/python${TRAVIS_PYTHON_VERSION}/bin/pep8 --ignore=E501,E12 salt/ && echo 'Finished PEP-8 Check Cleanly' || echo 'Finished PEP-8 Check With Errors'"
-
-script: "sudo -E /home/travis/virtualenv/python${TRAVIS_PYTHON_VERSION}/bin/python setup.py test --runtests-opts='--run-destructive --sysinfo -v --coverage'"
-
+- /home/travis/virtualenv/python${TRAVIS_PYTHON_VERSION}/bin/pylint --rcfile=.testing.pylintrc
+  salt/ && echo 'Finished Pylint Check Cleanly' || echo 'Finished Pylint Check With
+  Errors'
+- /home/travis/virtualenv/python${TRAVIS_PYTHON_VERSION}/bin/pep8 --ignore=E501,E12
+  salt/ && echo 'Finished PEP-8 Check Cleanly' || echo 'Finished PEP-8 Check With
+  Errors'
+script: sudo -E /home/travis/virtualenv/python${TRAVIS_PYTHON_VERSION}/bin/python
+  setup.py test --runtests-opts='--run-destructive --sysinfo -v --coverage'
 after_success:
-  - coveralls
-
+- coveralls
 notifications:
-  irc:
-    channels: "irc.freenode.org#salt-devel"
-    on_success: change
-    on_failure: change
+  slack:
+    secure: K2+E45VjF4C/UvUVomoLAjCSuKkGLJWGQi6eZQZxISu7J4vF9xGSIGCbevUyNsb1ezDTf9y/MYGnWWhXSnXujEjSILHUpv3SIjRK8+PvWs7uYm7e1Ck/IzZO/W7JdxRpWS/pS3bnOGyv0vDI3G7wCRnul95AOmB6c9q+jpHIC6vj7pHGo9OJQdCf5kacZeH1QX+3wGrrjTnmblK0qwsrTtN1NUCMFowfkvcBa8IVNM1y5vrv8mTcSxlnfmctMd/ihvDB5Q/+9D2NGJYt81IiSPghQDamiPCf7yGuvkifwQagSLsmIRaOhao7Sj5hf3AMKOOxKtH9MM0kvltnjBa0UwphWqOFmF3iFSq6JVAZ6BY+jYKRKKoywIOQiU++uyu7ZMr/c7jkInD2OGHwaWGmlBYSIDgjC5IcLxQHbV9JtmCYFAM4KvsGLOULno/nV4PFzKnr5Dbs288IQms1BvbU/QTdV0YMNUEO3YZf9G74J3DioKAdqSx77JUUOEP66xQO4EFHHaJW02TWl2OpMOX8TakijNfeDk1XeToVRv67aZkEGMXgWqEhlICHhggRYvM54IYDYvdBjTLEO9Q3JiKSGjicGCaj5woW10CzmofRf3c5QYgPKDAyY4mT2xNxjA1tnOfhiDLEY8xEziE5+WFmW3Hr7Ehm3fNHZpu4lIPkfbs=
