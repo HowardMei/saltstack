@@ -144,3 +144,51 @@ def service_highstate(requires=True):
                 )
 
     return ret
+
+
+def saltstate_list():
+    '''
+    Returns the list of current states on the node
+    CLI Example::
+        salt '*' introspect.saltstate_list
+    '''
+    import salt.state
+    hists = salt.state.HighState(__opts__)
+    top = hists.get_top()
+    return hists.top_matches(top)
+
+
+def saltstate_in(checklist, env=None, **kwargs):
+    '''
+    Return True if all given pkg names in the checklist are in current state
+    CLI Example::
+        salt '*' introspect.saltstate_in 'checklist={"nginx", "collectd"}' env=master
+    '''
+    import salt.state
+    from operator import add
+    checklist = set(checklist)
+    hists = salt.state.HighState(__opts__)
+    top = hists.get_top()
+    match = hists.top_matches(top)
+    if env != None:
+        if env in match:
+            return checklist.issubset(set(match[env]))
+    else:
+        for env in match:
+            if checklist.issubset(set(match[env])):
+                return True
+    return False
+
+
+def public_ipv4(checkurl=None, timeout=1):
+    '''
+    Return public ipv4 of the given machines
+    CLI Example::
+        salt '*' introspect.public_ipv4
+    '''
+    from salt.utils.get_pubip import get_pubipv4 as _get_pubipv4
+    ipv4=_get_pubipv4(checkurl,timeout)
+    if ipv4:
+        return ipv4
+    else
+        return 'Unknown'
