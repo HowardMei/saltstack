@@ -1937,3 +1937,14 @@ def get_master():
     return {'master': __opts__.get('master', '')}
 
 # vim: tabstop=4 expandtab shiftwidth=4 softtabstop=4
+
+
+def pubip4():
+    '''
+    Return the public ipv4 addrs
+    '''
+
+    if 'proxyminion' in __opts__:
+        return {}
+    grains['pubipv4'] = salt.utils.get_pubip.get_pubipv4()
+    return {'pubipv4': grains['pubipv4']}
