@@ -72,7 +72,7 @@ def _strip_listing_to_done(output_list):
     # some versions of rabbitmq have no trailing '...done' line,
     # which some versions do not output.
     l_line = ''.join(output_list[-1:])
-    if l_line == '...done':
+    if '...done' in l_line:
         output_list.pop()
 
     return output_list
@@ -578,7 +578,7 @@ def list_queues_vhost(vhost, runas=None, *kwargs):
     return res
 
 
-def list_policies(runas=None):
+def list_policies(vhost="/", runas=None):
     '''
     Return a dictionary of policies nested by vhost and name
     based on the data returned from rabbitmqctl list_policies.
@@ -594,7 +594,8 @@ def list_policies(runas=None):
     ret = {}
     if runas is None:
         runas = salt.utils.get_user()
-    res = __salt__['cmd.run']('rabbitmqctl list_policies',
+    res = __salt__['cmd.run']('rabbitmqctl list_policies -p {0}'.format(
+                              vhost),
                               runas=runas)
     for line in res.splitlines():
         if '...' not in line and line != '\n':

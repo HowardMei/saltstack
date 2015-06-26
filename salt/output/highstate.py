@@ -91,6 +91,7 @@ def _format_host(host, data):
             __opts__.get('color_theme'))
     tabular = __opts__.get('state_tabular', False)
     rcounts = {}
+    rdurations = []
     hcolor = colors['GREEN']
     hstrs = []
     nchanges = 0
@@ -130,6 +131,7 @@ def _format_host(host, data):
             # Increment result counts
             rcounts.setdefault(ret['result'], 0)
             rcounts[ret['result']] += 1
+            rdurations.append(ret['duration'])
 
             tcolor = colors['GREEN']
             schanged, ctext = _format_changes(ret['changes'])
@@ -246,6 +248,16 @@ def _format_host(host, data):
                     comment = comment.strip().replace(
                         u'\n',
                         u'\n' + u' ' * 14)
+            # If there is a data attribute, append it to the comment
+            if 'data' in ret:
+                if isinstance(ret['data'], list):
+                    for item in ret['data']:
+                        comment = '{0} {1}'.format(comment, item)
+                elif isinstance(ret['data'], dict):
+                    for key, value in ret['data'].items():
+                        comment = '{0}\n\t\t{1}: {2}'.format(comment, key, value)
+                else:
+                    comment = '{0} {1}'.format(comment, ret['data'])
             for detail in ['start_time', 'duration']:
                 ret.setdefault(detail, u'')
             if ret['duration'] != '':
@@ -352,11 +364,12 @@ def _format_host(host, data):
                     colors
                 )
             )
-
         totals = u'{0}\nTotal states run: {1:>{2}}'.format('-' * line_max_len,
                                                sum(six.itervalues(rcounts)) - rcounts.get('warnings', 0),
                                                line_max_len - 7)
         hstrs.append(colorfmt.format(colors['CYAN'], totals, colors))
+        total_duration = u'Total run time: {0:>{1}} ms'.format(sum(rdurations), line_max_len - 7)
+        hstrs.append(colorfmt.format(colors['CYAN'], total_duration, colors))
 
     if strip_colors:
         host = salt.output.strip_esc_sequence(host)

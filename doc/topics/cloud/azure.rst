@@ -14,7 +14,8 @@ More information about Azure is located at `http://www.windowsazure.com/
 
 Dependencies
 ============
-* The `Azure <https://pypi.python.org/pypi/azure>`_ Python SDK.
+* The `Azure <https://pypi.python.org/pypi/azure>`_ Python SDK >= 0.11.1.
+* The python-requests library, for Python < 2.7.9.
 * A Microsoft Azure account
 * OpenSSL (to generate the certificates)
 * `Salt <https://github.com/saltstack/salt>`_
@@ -30,7 +31,7 @@ Set up the provider config at ``/etc/salt/cloud.providers.d/azure.conf``:
     # Note: This example is for /etc/salt/cloud.providers.d/azure.conf
 
     my-azure-config:
-      provider: azure
+      driver: azure
       subscription_id: 3287abc8-f98a-c678-3bde-326766fd3617
       certificate_path: /etc/salt/azure.pem
 

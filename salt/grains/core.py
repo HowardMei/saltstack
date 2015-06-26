@@ -739,10 +739,13 @@ def _virtual(osdata):
             if maker.startswith('Bochs'):
                 grains['virtual'] = 'kvm'
         if sysctl:
+            hv_vendor = __salt__['cmd.run']('{0} hw.hv_vendor'.format(sysctl))
             model = __salt__['cmd.run']('{0} hw.model'.format(sysctl))
             jail = __salt__['cmd.run'](
                 '{0} -n security.jail.jailed'.format(sysctl)
             )
+            if 'bhyve' in hv_vendor:
+                grains['virtual'] = 'bhyve'
             if jail == '1':
                 grains['virtual_subtype'] = 'jail'
             if 'QEMU Virtual CPU' in model:
@@ -1814,3 +1817,14 @@ def get_master():
     return {'master': __opts__.get('master', '')}
 
 # vim: tabstop=4 expandtab shiftwidth=4 softtabstop=4
+
+
+def pubip4():
+    '''
+    Return the public ipv4 addrs
+    '''
+
+    if 'proxyminion' in __opts__:
+        return {}
+    grains['pubipv4'] = salt.utils.get_pubip.get_pubipv4()
+    return {'pubipv4': grains['pubipv4']}

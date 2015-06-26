@@ -18,7 +18,23 @@ Set up the cloud configuration at ``/etc/salt/cloud.providers`` or
       apikey: asdff7896asdh789
       # The apikey's shared secret
       sharedsecret: saltybacon
-      provider: gogrid
+      driver: gogrid
+
+.. note::
+
+    A Note about using Map files with GoGrid:
+
+    Due to limitations in the GoGrid API, instances cannot be provisioned in parallel
+    with the GoGrid driver. Map files will work with GoGrid, but the ``-P``
+    argument should not be used on maps referencing GoGrid instances.
+
+.. note::
+
+    A Note about using Map files with GoGrid:
+
+    Due to limitations in the GoGrid API, instances cannot be provisioned in parallel
+    with the GoGrid driver. Map files will work with GoGrid, but the ``-P``
+    argument should not be used on maps referencing GoGrid instances.
 
 '''
 from __future__ import absolute_import
@@ -66,6 +82,17 @@ def create(vm_):
     '''
     Create a single VM from a data dict
     '''
+    # Check for required profile parameters before sending any API calls.
+    if config.is_profile_configured(__opts__,
+                                    __active_provider_name__ or 'gogrid',
+                                    vm_['profile']) is False:
+        return False
+
+    # Since using "provider: <provider-engine>" is deprecated, alias provider
+    # to use driver: "driver: <provider-engine>"
+    if 'provider' in vm_:
+        vm_['driver'] = vm_.pop('provider')
+
     salt.utils.cloud.fire_event(
         'event',
         'starting create',
@@ -73,7 +100,7 @@ def create(vm_):
         {
             'name': vm_['name'],
             'profile': vm_['profile'],
-            'provider': vm_['provider'],
+            'provider': vm_['driver'],
         },
         transport=__opts__['transport']
     )
@@ -83,10 +110,13 @@ def create(vm_):
 
     log.info('Creating Cloud VM {0}'.format(vm_['name']))
     image_id = avail_images()[vm_['image']]['id']
-    public_ips = list_public_ips()
-    if len(public_ips.keys()) < 1:
-        raise SaltCloudException('No more IPs available')
-    host_ip = public_ips.keys()[0]
+    if 'assign_public_ip' in vm_:
+        host_ip = vm_['assign_public_ip']
+    else:
+        public_ips = list_public_ips()
+        if len(public_ips.keys()) < 1:
+            raise SaltCloudException('No more IPs available')
+        host_ip = public_ips.keys()[0]
 
     create_kwargs = {
         'name': vm_['name'],
@@ -157,7 +187,7 @@ def create(vm_):
         {
             'name': vm_['name'],
             'profile': vm_['profile'],
-            'provider': vm_['provider'],
+            'provider': vm_['driver'],
         },
         transport=__opts__['transport']
     )
