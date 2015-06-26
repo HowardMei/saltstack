@@ -642,17 +642,18 @@ def import_key(user=None,
             raise SaltInvocationError('filename does not exist.')
 
     import_result = gpg.import_keys(text)
+    counts = import_result.counts
     log.debug('imported_data {0}'.format(list(import_result.__dict__.keys())))
-    log.debug('imported_data {0}'.format(import_result.counts))
+    log.debug('imported_data {0}'.format(counts))
 
-    if import_result.imported or import_result.imported_rsa:
+    if counts.get('imported') or counts.get('imported_rsa'):
         ret['message'] = 'Successfully imported key(s).'
-    elif import_result.unchanged:
+    elif counts.get('unchanged'):
         ret['message'] = 'Key(s) already exist in keychain.'
-    elif import_result.not_imported:
+    elif counts.get('not_imported'):
         ret['res'] = False
         ret['message'] = 'Unable to import key.'
-    elif not import_result.count:
+    elif not counts.get('count'):
         ret['res'] = False
         ret['message'] = 'Unable to import key.'
 
@@ -977,7 +978,8 @@ def encrypt(user=None,
             output=None,
             sign=None,
             use_passphrase=False,
-            gnupghome=None):
+            gnupghome=None,
+            bare=False):
     '''
     Encrypt a message or file
 
@@ -1006,6 +1008,10 @@ def encrypt(user=None,
 
     gnupghome
         Specify the location where GPG related files are stored.
+
+    bare
+        If True, return the (armored) encrypted block as a string without the
+        standard comment/res dict
 
     CLI Example:
 
@@ -1052,13 +1058,19 @@ def encrypt(user=None,
         raise SaltInvocationError('filename or text must be passed.')
 
     if result.ok:
-        if output:
-            ret['comment'] = 'Encrypted data has been written to {0}'.format(output)
+        if not bare:
+            if output:
+                ret['comment'] = 'Encrypted data has been written to {0}'.format(output)
+            else:
+                ret['comment'] = result.data
         else:
-            ret['comment'] = result.data
+            ret = result.data
     else:
-        ret['res'] = False
-        ret['comment'] = '{0}.\nPlease check the salt-minion log.'.format(result.status)
+        if not bare:
+            ret['res'] = False
+            ret['comment'] = '{0}.\nPlease check the salt-minion log.'.format(result.status)
+        else:
+            ret = False
         log.error(result.stderr)
     return ret
 
@@ -1068,7 +1080,8 @@ def decrypt(user=None,
             filename=None,
             output=None,
             use_passphrase=False,
-            gnupghome=None):
+            gnupghome=None,
+            bare=False):
     '''
     Decrypt a message or file
 
@@ -1090,6 +1103,10 @@ def decrypt(user=None,
 
     gnupghome
         Specify the location where GPG related files are stored.
+
+    bare
+        If True, return the (armored) decrypted block as a string without the
+        standard comment/res dict
 
     CLI Example:
 
@@ -1126,12 +1143,20 @@ def decrypt(user=None,
         raise SaltInvocationError('filename or text must be passed.')
 
     if result.ok:
-        if output:
-            ret['comment'] = 'Decrypted data has been written to {0}'.format(output)
+        if not bare:
+            if output:
+                ret['comment'] = 'Decrypted data has been written to {0}'.format(output)
+            else:
+                ret['comment'] = result.data
         else:
-            ret['comment'] = result.data
+            ret = result.data
     else:
-        ret['res'] = False
-        ret['comment'] = '{0}.\nPlease check the salt-minion log.'.format(result.status)
+        if not bare:
+            ret['res'] = False
+            ret['comment'] = '{0}.\nPlease check the salt-minion log.'.format(result.status)
+        else:
+            ret = False
+
         log.error(result.stderr)
+
     return ret

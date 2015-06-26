@@ -26,7 +26,7 @@ If this driver is still needed, set up the cloud configuration at
       # The location of the private key which corresponds to the keyname
       private_key: /root/default.pem
 
-      provider: aws
+      driver: aws
 
 '''
 from __future__ import absolute_import
@@ -77,9 +77,6 @@ except ImportError:
 
 # Get logging started
 log = logging.getLogger(__name__)
-
-# namespace libcloudfuncs
-get_salt_interface = namespaced_function(get_salt_interface, globals())
 
 # Define the module's virtual name
 __virtualname__ = 'aws'
@@ -313,6 +310,12 @@ def create(vm_):
     '''
     Create a single VM from a data dict
     '''
+    # Check for required profile parameters before sending any API calls.
+    if config.is_profile_configured(__opts__,
+                                    __active_provider_name__ or 'aws',
+                                    vm_['profile']) is False:
+        return False
+
     key_filename = config.get_cloud_config_value(
         'private_key', vm_, __opts__, search_global=False, default=None
     )
@@ -424,7 +427,7 @@ def create(vm_):
         log.info('Salt node data. Public_ip: {0}'.format(data.public_ips[0]))
         ip_address = data.public_ips[0]
 
-    if get_salt_interface(vm_) == 'private_ips':
+    if salt.utils.cloud.get_salt_interface(vm_, __opts__) == 'private_ips':
         salt_ip_address = data.private_ips[0]
         log.info('Salt interface set to: {0}'.format(salt_ip_address))
     else:

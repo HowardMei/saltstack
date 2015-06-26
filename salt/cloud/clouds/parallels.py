@@ -16,7 +16,7 @@ Set up the cloud configuration at ``/etc/salt/cloud.providers`` or
       user: myuser
       password: mypassword
       url: https://api.cloud.xmission.com:4465/paci/v1.0/
-      provider: parallels
+      driver: parallels
 
 '''
 
@@ -270,6 +270,17 @@ def create(vm_):
     '''
     Create a single VM from a data dict
     '''
+    # Check for required profile parameters before sending any API calls.
+    if config.is_profile_configured(__opts__,
+                                    __active_provider_name__ or 'parallels',
+                                    vm_['profile']) is False:
+        return False
+
+    # Since using "provider: <provider-engine>" is deprecated, alias provider
+    # to use driver: "driver: <provider-engine>"
+    if 'provider' in vm_:
+        vm_['driver'] = vm_.pop('provider')
+
     salt.utils.cloud.fire_event(
         'event',
         'starting create',
@@ -277,7 +288,7 @@ def create(vm_):
         {
             'name': vm_['name'],
             'profile': vm_['profile'],
-            'provider': vm_['provider'],
+            'provider': vm_['driver'],
         },
         transport=__opts__['transport']
     )
@@ -456,7 +467,7 @@ def create(vm_):
         {
             'name': vm_['name'],
             'profile': vm_['profile'],
-            'provider': vm_['provider'],
+            'provider': vm_['driver'],
         },
         transport=__opts__['transport']
     )

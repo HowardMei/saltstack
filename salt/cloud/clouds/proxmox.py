@@ -18,7 +18,7 @@ Set up the cloud configuration at ``/etc/salt/cloud.providers`` or
       user: myuser@pam or myuser@pve
       password: mypassword
       url: hypervisor.domain.tld
-      provider: proxmox
+      driver: proxmox
 
 :maintainer: Frank Klaassen <frank@cloudright.nl>
 :maturity: new
@@ -480,6 +480,17 @@ def create(vm_):
 
         salt-cloud -p proxmox-ubuntu vmhostname
     '''
+    # Check for required profile parameters before sending any API calls.
+    if config.is_profile_configured(__opts__,
+                                    __active_provider_name__ or 'proxmox',
+                                    vm_['profile']) is False:
+        return False
+
+    # Since using "provider: <provider-engine>" is deprecated, alias provider
+    # to use driver: "driver: <provider-engine>"
+    if 'provider' in vm_:
+        vm_['driver'] = vm_.pop('provider')
+
     ret = {}
 
     salt.utils.cloud.fire_event(
@@ -489,7 +500,7 @@ def create(vm_):
         {
             'name': vm_['name'],
             'profile': vm_['profile'],
-            'provider': vm_['provider'],
+            'provider': vm_['driver'],
         },
         transport=__opts__['transport']
     )
@@ -675,7 +686,7 @@ def create(vm_):
         {
             'name': vm_['name'],
             'profile': vm_['profile'],
-            'provider': vm_['provider'],
+            'provider': vm_['driver'],
         },
     )
 

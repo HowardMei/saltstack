@@ -51,7 +51,7 @@ Setting up Service Account Authentication:
       service_account_email_address: 1234567890@developer.gserviceaccount.com
       # The location of the private key (PEM format)
       service_account_private_key: /home/erjohnso/PRIVKEY.pem
-      provider: gce
+      driver: gce
       # Specify whether to use public or private IP for deploy script.
       # Valid options are:
       #     private_ips - The salt-master is also hosted with GCE
@@ -561,7 +561,7 @@ def create_network(kwargs=None, call=None):
         log.error(
             'A network CIDR range must be specified when creating a network.'
         )
-        return False
+        return
 
     name = kwargs['name']
     cidr = kwargs['cidr']
@@ -2027,6 +2027,12 @@ def create(vm_=None, call=None):
                 GCE_VM_NAME_REGEX.pattern
             )
         )
+
+    # Check for required profile parameters before sending any API calls.
+    if config.is_profile_configured(__opts__,
+                                    __active_provider_name__ or 'gce',
+                                    vm_['profile']) is False:
+        return False
 
     conn = get_conn()
 
