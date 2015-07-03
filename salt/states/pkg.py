@@ -87,6 +87,8 @@ if salt.utils.is_windows():
     from salt.modules.win_pkg import get_repo_data
     from salt.modules.win_pkg import _get_latest_pkg_version
     from salt.modules.win_pkg import _reverse_cmp_pkg_versions
+    from salt.modules.win_pkg import _get_local_repo_dir
+    _get_local_repo_dir = _namespaced_function(_get_local_repo_dir, globals())
     _get_package_info = _namespaced_function(_get_package_info, globals())
     get_repo_data = _namespaced_function(get_repo_data, globals())
     _get_latest_pkg_version = \
@@ -1136,14 +1138,15 @@ def installed(
 
     if modified_hold:
         for i in modified_hold:
-            comment.append(i['comment'])
             change_name = i['name']
-            if len(changes[change_name]['new']) > 0:
-                changes[change_name]['new'] += '\n'
-            changes[change_name]['new'] += '{0}'.format(i['changes']['new'])
-            if len(changes[change_name]['old']) > 0:
-                changes[change_name]['old'] += '\n'
-            changes[change_name]['old'] += '{0}'.format(i['changes']['old'])
+            if change_name in changes:
+                comment.append(i['comment'])
+                if len(changes[change_name]['new']) > 0:
+                    changes[change_name]['new'] += '\n'
+                changes[change_name]['new'] += '{0}'.format(i['changes']['new'])
+                if len(changes[change_name]['old']) > 0:
+                    changes[change_name]['old'] += '\n'
+                changes[change_name]['old'] += '{0}'.format(i['changes']['old'])
 
     # Any requested packages that were not targeted for install or reinstall
     if not_modified:

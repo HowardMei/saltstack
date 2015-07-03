@@ -73,6 +73,11 @@ VALID_OPTS = {
     # module function to run to determine the master hostname.
     'master_type': str,
 
+    # Specify the format in which the master address will be specified. Can
+    # specify 'default' or 'ip_only'. If 'ip_only' is specified, then the
+    # master address will not be split into IP and PORT.
+    'master_uri_format': str,
+
     # The fingerprint of the master key may be specified to increase security. Generate
     # a master fingerprint with `salt-key -F master`
     'master_finger': str,
@@ -370,8 +375,8 @@ VALID_OPTS = {
     # Events matching a tag in this list should never be sent to an event returner.
     'event_return_blacklist': list,
 
-    # The file cache for the win_pkg module
-    'win_repo_cachefile': str,
+    # The source location for the winrepo sls files
+    'win_repo_source_dir': str,
 
     # This pidfile to write out to when a deamon starts
     'pidfile': str,
@@ -679,6 +684,8 @@ VALID_OPTS = {
 
     # Used by salt-api for master requests timeout
     'rest_timeout': int,
+
+    'sudo_user': str,
 }
 
 # default configurations
@@ -686,6 +693,7 @@ DEFAULT_MINION_OPTS = {
     'interface': '0.0.0.0',
     'master': 'salt',
     'master_type': 'str',
+    'master_uri_format': 'default',
     'master_port': '4506',
     'master_finger': '',
     'master_shuffle': False,
@@ -800,7 +808,7 @@ DEFAULT_MINION_OPTS = {
     'syndic_log_file': os.path.join(salt.syspaths.LOGS_DIR, 'syndic'),
     'syndic_pidfile': os.path.join(salt.syspaths.PIDFILE_DIR, 'salt-syndic.pid'),
     'random_reauth_delay': 10,
-    'win_repo_cachefile': 'salt://win/repo/winrepo.p',
+    'win_repo_source_dir': 'salt://win/repo/',
     'pidfile': os.path.join(salt.syspaths.PIDFILE_DIR, 'salt-minion.pid'),
     'range_server': 'range:80',
     'tcp_keepalive': True,
@@ -840,6 +848,7 @@ DEFAULT_MINION_OPTS = {
     'zmq_monitor': False,
     'cache_sreqs': True,
     'cmd_safe': True,
+    'sudo_user': '',
 }
 
 DEFAULT_MASTER_OPTS = {
@@ -1342,14 +1351,13 @@ def prepend_root_dir(opts, path_options):
     'root_dir' option.
     '''
     root_dir = os.path.abspath(opts['root_dir'])
+    root_opt = opts['root_dir'].rstrip(os.sep)
     for path_option in path_options:
         if path_option in opts:
-            if opts[path_option].startswith(opts['root_dir']):
-                opts[path_option] = opts[path_option][len(opts['root_dir']):]
-            opts[path_option] = salt.utils.path_join(
-                root_dir,
-                opts[path_option]
-            )
+            path = opts[path_option]
+            if path == root_opt or path.startswith(root_opt + os.sep):
+                path = path[len(root_opt):]
+            opts[path_option] = salt.utils.path_join(root_dir, path)
 
 
 def insert_system_path(opts, paths):
@@ -2793,4 +2801,4 @@ def spm_config(path):
     # Let's override them with spm's required defaults
     defaults.update(DEFAULT_SPM_OPTS)
 
-    return client_config(path, defaults=defaults)
+    return client_config(path, env_var='SPM_CONFIG', defaults=defaults)
