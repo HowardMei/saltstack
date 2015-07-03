@@ -1651,8 +1651,13 @@ def replace(path,
         with salt.utils.fopen(path,
                               mode='r',
                               buffering=bufsize) as r_file:
+            count_replaced = 0
             for line in r_file:
-                result, nrepl = re.subn(cpattern, repl, line, count)
+                if count == 0 or count_replaced <= count:
+                    result, nrepl = re.subn(cpattern, repl, line, count)
+                    count_replaced += nrepl
+                else:
+                    break
 
                 # found anything? (even if no change)
                 if nrepl > 0:
@@ -1700,9 +1705,15 @@ def replace(path,
                     with salt.utils.fopen(temp_file,
                                           mode='r',
                                           buffering=bufsize) as r_file:
+                        count_replaced = 0
                         for line in r_file:
                             result, nrepl = re.subn(cpattern, repl,
                                                     line, count)
+                            if count == 0 or count_replaced <= count:
+                                result, nrepl = re.subn(cpattern, repl, line, count)
+                                count_replaced += nrepl
+                            else:
+                                result = line
                             try:
                                 w_file.write(result)
                             except (OSError, IOError) as exc:
@@ -2893,7 +2904,7 @@ def remove(path):
     path = os.path.expanduser(path)
 
     if not os.path.isabs(path):
-        raise SaltInvocationError('File path must be absolute.')
+        raise SaltInvocationError('File path must be absolute: {0}'.format(path))
 
     try:
         if os.path.isfile(path) or os.path.islink(path):
@@ -3144,8 +3155,61 @@ def get_managed(
     # Copy the file to the minion and templatize it
     sfn = ''
     source_sum = {}
+    # if we have a source defined, lets figure out what the hash is
+    if source:
+        urlparsed_source = _urlparse(source)
+        if urlparsed_source.scheme == 'salt':
+            source_sum = __salt__['cp.hash_file'](source, saltenv)
+            if not source_sum:
+                return '', {}, 'Source file {0} not found'.format(source)
+        # if its a local file
+        elif urlparsed_source.scheme == 'file':
+            source_sum = get_hash(urlparsed_source.path)
+        elif source.startswith('/'):
+            source_sum = get_hash(source)
+        elif source_hash:
+            protos = ('salt', 'http', 'https', 'ftp', 'swift')
+            if _urlparse(source_hash).scheme in protos:
+                # The source_hash is a file on a server
+                hash_fn = __salt__['cp.cache_file'](source_hash, saltenv)
+                if not hash_fn:
+                    return '', {}, 'Source hash file {0} not found'.format(
+                        source_hash)
+                source_sum = extract_hash(hash_fn, '', name)
+                if source_sum is None:
+                    return '', {}, ('Source hash file {0} contains an invalid '
+                        'hash format, it must be in the format <hash type>=<hash>.'
+                        ).format(source_hash)
+
+            else:
+                # The source_hash is a hash string
+                comps = source_hash.split('=')
+                if len(comps) < 2:
+                    return '', {}, ('Source hash file {0} contains an '
+                                    'invalid hash format, it must be in '
+                                    'the format <hash type>=<hash>'
+                                    ).format(source_hash)
+                source_sum['hsum'] = comps[1].strip()
+                source_sum['hash_type'] = comps[0].strip()
+        else:
+            return '', {}, ('Unable to determine upstream hash of'
+                            ' source file {0}').format(source)
+
+    # if the file is a template we need to actually template the file to get
+    # a checksum, but we can cache the template itself, but only if there is
+    # a template source (it could be a templated contents)
     if template and source:
-        sfn = __salt__['cp.cache_file'](source, saltenv)
+        # check if we have the template cached
+        template_dest = __salt__['cp.is_cached'](source, saltenv)
+        if template_dest:
+            comps = source_hash.split('=')
+            cached_template_sum = get_hash(template_dest, form=source_sum['hash_type'])
+            if cached_template_sum == source_sum['hsum']:
+                sfn = template_dest
+        # if we didn't have the template file, lets get it
+        if not sfn:
+            sfn = __salt__['cp.cache_file'](source, saltenv)
+
         # exists doesn't play nice with sfn as bool
         # but if cache failed, sfn == False
         if not sfn or not os.path.exists(sfn):
@@ -3184,40 +3248,7 @@ def get_managed(
         else:
             __clean_tmp(sfn)
             return sfn, {}, data['data']
-    else:
-        # Copy the file down if there is a source
-        if source:
-            if _urlparse(source).scheme == 'salt':
-                source_sum = __salt__['cp.hash_file'](source, saltenv)
-                if not source_sum:
-                    return '', {}, 'Source file {0!r} not found'.format(source)
-            elif source_hash:
-                protos = ['salt', 'http', 'https', 'ftp', 'swift', 's3']
-                if _urlparse(source_hash).scheme in protos:
-                    # The source_hash is a file on a server
-                    hash_fn = __salt__['cp.cache_file'](source_hash, saltenv)
-                    if not hash_fn:
-                        return '', {}, 'Source hash file {0} not found'.format(
-                            source_hash)
-                    source_sum = extract_hash(hash_fn, '', name)
-                    if source_sum is None:
-                        return '', {}, ('Source hash file {0} contains an invalid '
-                            'hash format, it must be in the format <hash type>=<hash>.'
-                            ).format(source_hash)
 
-                else:
-                    # The source_hash is a hash string
-                    comps = source_hash.split('=')
-                    if len(comps) < 2:
-                        return '', {}, ('Source hash file {0} contains an '
-                                        'invalid hash format, it must be in '
-                                        'the format <hash type>=<hash>'
-                                        ).format(source_hash)
-                    source_sum['hsum'] = comps[1].strip()
-                    source_sum['hash_type'] = comps[0].strip()
-            else:
-                return '', {}, ('Unable to determine upstream hash of'
-                                ' source file {0}').format(source)
     return sfn, source_sum, ''
 
 
