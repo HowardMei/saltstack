@@ -19,6 +19,17 @@ Salt Cloud Changes
 
 - Modified the Linode Salt Cloud driver to use Linode's native API instead of
   depending on apache-libcloud or linode-python.
+- When querying for VMs in ``ditigal_ocean.py``, the number of VMs to include in
+  a page was changed from 20 (default) to 200 to reduce the number of API calls
+  to Digital Ocean.
+
+Git Pillar Rewritten
+====================
+
+The Git external pillar has been rewritten to bring it up to feature parity
+with :mod:`gitfs <salt.fileserver.gitfs>`. See :mod:`here
+<salt.pillar.git_pillar>` for more information on the new git_pillar
+functionality.
 
 JBoss 7 State
 =============
@@ -79,3 +90,18 @@ the Nitrogen release of Salt. Example provider file:
       keyname: my_test_key
       securitygroup: default
       driver: ec2
+
+- The use of ``lock`` has been deprecated and from ``salt.utils.fopen``.
+``salt.utils.flopen`` should be used instead.
+
+- The following args have been deprecated from the ``rabbitmq_vhost.present``
+state: ``user``, ``owner``, ``conf``, ``write``, ``read``, and ``runas``.
+
+- The use of ``runas`` has been deprecated from the ``rabbitmq_vhost.absent``
+state.
+
+- Support for ``output`` in ``mine.get`` was removed. ``--out`` should be used
+instead.
+
+- The use of ``delim`` was removed from the following functions in the ``match``
+execution module: ``pillar_pcre``, ``pillar``, ``grain_pcre``,

@@ -150,11 +150,12 @@ def _fulfills_version_spec(versions, oper, desired_version):
     Returns True if any of the installed versions match the specified version,
     otherwise returns False
     '''
+    cmp_func = __salt__.get('pkg.version_cmp')
     for ver in versions:
         if salt.utils.compare_versions(ver1=ver,
                                        oper=oper,
                                        ver2=desired_version,
-                                       cmp_func=__salt__.get('version_cmp')):
+                                       cmp_func=cmp_func):
             return True
     return False
 
@@ -345,7 +346,12 @@ def _find_install_targets(name=None,
         # enforced. Takes extra time. Disable for improved performance
         if not skip_suggestions:
             # Perform platform-specific pre-flight checks
-            problems = _preflight_check(desired, **kwargs)
+            not_installed = dict([
+                (name, version)
+                for name, version in desired.items()
+                if not (name in cur_pkgs and version in (None, cur_pkgs[name]))
+            ])
+            problems = _preflight_check(not_installed, **kwargs)
             comments = []
             if problems.get('no_suggest'):
                 comments.append(
@@ -1371,7 +1377,7 @@ def latest(
 
     targets = {}
     problems = []
-    cmp_func = __salt__.get('pkg.version_cmp', __salt__.get('version_cmp'))
+    cmp_func = __salt__.get('pkg.version_cmp')
     minion_os = __salt__['grains.item']('os')['os']
 
     if minion_os == 'Gentoo' and watch_flags:
@@ -1647,7 +1653,7 @@ def removed(name, version=None, pkgs=None, normalize=True, **kwargs):
         part of the name, such as kernel modules which match a specific kernel
         version.
 
-        .. versionadded:: Beryllium
+        .. versionadded:: 2015.8.0
 
     Multiple Package Options:
 
@@ -1688,7 +1694,7 @@ def purged(name, version=None, pkgs=None, normalize=True, **kwargs):
         part of the name, such as kernel modules which match a specific kernel
         version.
 
-        .. versionadded:: Beryllium
+        .. versionadded:: 2015.8.0
 
     Multiple Package Options:
 
@@ -1771,7 +1777,7 @@ def uptodate(name, refresh=False, **kwargs):
 
 def group_installed(name, skip=None, include=None, **kwargs):
     '''
-    .. versionadded:: Beryllium
+    .. versionadded:: 2015.8.0
 
     Ensure that an entire package group is installed. This state is only
     supported for the :mod:`yum <salt.modules.yumpkg>` package manager.
