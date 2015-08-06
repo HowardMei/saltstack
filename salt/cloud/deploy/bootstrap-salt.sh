@@ -17,11 +17,12 @@
 #       CREATED: 10/15/2012 09:49:37 PM WEST
 #======================================================================================================================
 set -o nounset                              # Treat unset variables as an error
-__ScriptVersion="2015.05.07"
-__ScriptVersion="v${__ScriptVersion}/Mubiic-r2015.06.10"
+
+__ScriptVersion="2015.07.22"
 __ScriptName="bootstrap-salt.sh"
+__ScriptVersion="v${__ScriptVersion}/Mubiic-r2015.08.05"
 __GPG_KEY_URLFILE="http://debian.saltstack.com/debian-salt-team-joehealy.gpg.key"
-__CUSTOM_REPO_NAME="mubiic/saltstack"
+__CUSTOM_REPO_NAME="saltstack/salt"
 __CUSTOM_REPO_PATH="github.com/${__CUSTOM_REPO_NAME}"
 __CUSTOM_RAW_URLPATH="raw.githubusercontent.com/${__CUSTOM_REPO_NAME}"
 __GET_PIP_URLFILE="https://bootstrap.pypa.io/get-pip.py"
@@ -216,8 +217,8 @@ _SALT_MINION_ID="null"
 __SIMPLIFY_VERSION=$BS_TRUE
 _LIBCLOUD_MIN_VERSION="0.16.0"
 _PY_REQUESTS_MIN_VERSION="2.0"
-_EXTRA_PACKAGES="git python-git"
-_BASE_PIP_PACKAGES="pip setuptools virtualenv pss gitpython pew apache-libcloud"
+_EXTRA_PACKAGES="git ca-certificates"
+_BASE_PIP_PACKAGES="virtualenv pss gitpython pew apache-libcloud msgpack-python docker-py docker-compose"
 _HTTP_PROXY=""
 _DISABLE_SALT_CHECKS=$BS_FALSE
 __SALT_GIT_CHECKOUT_DIR=${BS_SALT_GIT_CHECKOUT_DIR:-/tmp/git/salt}
@@ -259,7 +260,7 @@ usage() {
   -n  No colours.
   -D  Show debug output.
   -c  Temporary configuration directory
-  -d  Salt git checkout destination. (Default:__SALT_GIT_CHECKOUT_DIR = /tmp/git/salt)
+  -t  Target git checkout path for Salt. (Default:__SALT_GIT_CHECKOUT_DIR = /tmp/git/salt)
   -g  Salt repository URL. (Default: https://${__CUSTOM_REPO_PATH}.git) or Github repo name with -G option
   -G  Use Github as repository domain name when -g option is a repo name like: saltstack/salt
   -k  Temporary directory holding the minion keys which will pre-seed
@@ -300,7 +301,8 @@ EOT
 }   # ----------  end of function usage  ----------
 
 
-while getopts ":hvnDcd:Gg:k:MSNXCPFUKIA:i:Lp:H:Z" opt
+
+while getopts ":hvnDc:Gg:k:MSNXCPFUKIA:i:Lp:dH:Z" opt
 do
   case "${opt}" in
 
@@ -319,7 +321,7 @@ do
              exit 1
          fi
          ;;
-    d ) __SALT_GIT_CHECKOUT_DIR="$OPTARG"               ;;
+    t ) __SALT_GIT_CHECKOUT_DIR="$OPTARG"               ;;
     g ) _SALT_REPO_URL="$OPTARG"
         if echo "${_SALT_REPO_URL}" | grep -iq "github.com"; then
             __CUSTOM_REPO_NAME="$(echo ${_SALT_REPO_URL} | awk -F'github.com/' '{print $NF}' 2>/dev/null | awk -F/ '{print $1"/"$2}' 2>/dev/null | sed 's/\.git$//' 2>/dev/null)"
@@ -503,6 +505,13 @@ CALLER=$(ps -a -o pid,args | grep $$ | grep -v grep | tr -s ' ' | cut -d ' ' -f 
 
 if [ "${CALLER}x" = "${0}x" ]; then
     CALLER="PIPED THROUGH"
+fi
+
+
+# Work around for 'Docker + salt-bootstrap failure' https://github.com/saltstack/salt-bootstrap/issues/394
+if [ ${_DISABLE_SALT_CHECKS} -eq 0 ]; then
+    [ -f /tmp/disable_salt_checks ] && _DISABLE_SALT_CHECKS=$BS_TRUE && \
+        echowarn "Found file: /tmp/disable_salt_checks, setting \$_DISABLE_SALT_CHECKS=true"
 fi
 
 echoinfo "Bootstrap ${_SALT_REPO_URL} ${ITYPE} ${GIT_REV}"
@@ -1834,8 +1843,12 @@ install_ubuntu_deps() {
     if [ "$_INSTALL_CLOUD" -eq $BS_TRUE ]; then
         check_pip_allowed "You need to allow pip based installations (-P) in order to install 'apache-libcloud'"
         if [ "$(which pip)" = "" ]; then
+
+            __PACKAGES="${__PACKAGES} python-setuptools python-pip"
+
             [ -f get-pip.py ] && python get-pip.py || wget $_WGET_ARGS -q ${__GET_PIP_URLFILE} -O - | python
             #__apt_get_install_noinput python-pip
+
         fi
         pip install --upgrade ${_BASE_PIP_PACKAGES}
         # shellcheck disable=SC2089
@@ -1940,6 +1953,7 @@ install_ubuntu_git_deps() {
                 [ -f get-pip.py ] && python get-pip.py || wget $_WGET_ARGS -q ${__GET_PIP_URLFILE} -O - | python
                 #__apt_get_install_noinput python-setuptools python-pip
             fi
+
             pip install --upgrade ${_BASE_PIP_PACKAGES}
             pip install -U "'${__REQUIRED_TORNADO}'"
 
