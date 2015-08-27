@@ -9,8 +9,9 @@ import re
 
 try:
     import pwd
+    HAS_PWD = True
 except ImportError:
-    pass
+    HAS_PWD = False
 import logging
 import copy
 
@@ -32,10 +33,9 @@ __virtualname__ = 'user'
 def __virtual__():
     '''
     Set the user module if the kernel is Linux, OpenBSD or NetBSD
-    and remove some of the functionality on OS X
     '''
 
-    if __grains__['kernel'] in ('Linux', 'OpenBSD', 'NetBSD'):
+    if HAS_PWD and __grains__['kernel'] in ('Linux', 'OpenBSD', 'NetBSD'):
         return __virtualname__
     return False
 
@@ -389,7 +389,11 @@ def chfullname(name, fullname):
 
         salt '*' user.chfullname foo "Foo Bar"
     '''
-    fullname = str(fullname)
+    if fullname is None:
+        fullname = ''
+    else:
+        fullname = str(fullname)
+
     pre_info = _get_gecos(name)
     if not pre_info:
         return False
@@ -415,7 +419,11 @@ def chroomnumber(name, roomnumber):
 
         salt '*' user.chroomnumber foo 123
     '''
-    roomnumber = str(roomnumber)
+    if roomnumber is None:
+        roomnumber = ''
+    else:
+        roomnumber = str(roomnumber)
+
     pre_info = _get_gecos(name)
     if not pre_info:
         return False
@@ -441,7 +449,11 @@ def chworkphone(name, workphone):
 
         salt '*' user.chworkphone foo "7735550123"
     '''
-    workphone = str(workphone)
+    if workphone is None:
+        workphone = ''
+    else:
+        workphone = str(workphone)
+
     pre_info = _get_gecos(name)
     if not pre_info:
         return False
@@ -467,7 +479,11 @@ def chhomephone(name, homephone):
 
         salt '*' user.chhomephone foo "7735551234"
     '''
-    homephone = str(homephone)
+    if homephone is None:
+        homephone = ''
+    else:
+        homephone = str(homephone)
+
     pre_info = _get_gecos(name)
     if not pre_info:
         return False

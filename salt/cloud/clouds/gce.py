@@ -143,8 +143,8 @@ def __virtual__():
         pathname = os.path.expanduser(details['service_account_private_key'])
         if not os.path.exists(pathname):
             raise SaltCloudException(
-                'The GCE service account private key {0!r} used in '
-                'the {1!r} provider configuration does not exist\n'.format(
+                'The GCE service account private key \'{0}\' used in '
+                'the \'{1}\' provider configuration does not exist\n'.format(
                     details['service_account_private_key'], provider
                 )
             )
@@ -153,8 +153,8 @@ def __virtual__():
         )
         if keymode not in ('0400', '0600'):
             raise SaltCloudException(
-                'The GCE service account private key {0!r} used in '
-                'the {1!r} provider configuration needs to be set to '
+                'The GCE service account private key \'{0}\' used in '
+                'the \'{1}\' provider configuration needs to be set to '
                 'mode 0400 or 0600\n'.format(
                     details['service_account_private_key'], provider
                 )
@@ -2029,9 +2029,9 @@ def create(vm_=None, call=None):
 
     try:
         # Check for required profile parameters before sending any API calls.
-        if config.is_profile_configured(__opts__,
-                                        __active_provider_name__ or 'gce',
-                                        vm_['profile']) is False:
+        if vm_['profile'] and config.is_profile_configured(__opts__,
+                                                           __active_provider_name__ or 'gce',
+                                                           vm_['profile']) is False:
             return False
     except AttributeError:
         pass
@@ -2080,7 +2080,9 @@ def create(vm_=None, call=None):
         kwargs['external_ip'] = None
     elif kwargs['external_ip'] != 'ephemeral':
         region = '-'.join(kwargs['location'].name.split('-')[:2])
-        kwargs['external_ip'] = __create_orget_address(conn, kwargs['external_ip'], region)
+        kwargs['external_ip'] = __create_orget_address(conn,
+                                                       kwargs['external_ip'],
+                                                       region)
 
     log.info('Creating GCE instance {0} in {1}'.format(vm_['name'],
         kwargs['location'].name)
@@ -2121,10 +2123,11 @@ def create(vm_=None, call=None):
     ssh_user, ssh_key = __get_ssh_credentials(vm_)
     vm_['ssh_host'] = __get_host(node_data, vm_)
     vm_['key_filename'] = ssh_key
+    salt.utils.cloud.bootstrap(vm_, __opts__)
 
-    log.info('Created Cloud VM {0[name]!r}'.format(vm_))
-    log.debug(
-        '{0[name]!r} VM creation details:\n{1}'.format(
+    log.info('Created Cloud VM \'{0[name]}\''.format(vm_))
+    log.trace(
+        '\'{0[name]}\' VM creation details:\n{1}'.format(
             vm_, pprint.pformat(node_dict)
         )
     )

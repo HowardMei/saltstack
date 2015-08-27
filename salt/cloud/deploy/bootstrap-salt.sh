@@ -17,8 +17,7 @@
 #       CREATED: 10/15/2012 09:49:37 PM WEST
 #======================================================================================================================
 set -o nounset                              # Treat unset variables as an error
-
-__ScriptVersion="2015.07.22"
+__ScriptVersion="2015.08.06"
 __ScriptName="bootstrap-salt.sh"
 __ScriptVersion="v${__ScriptVersion}/Mubiic-r2015.08.05"
 __GPG_KEY_URLFILE="http://debian.saltstack.com/debian-salt-team-joehealy.gpg.key"
@@ -1896,13 +1895,17 @@ install_ubuntu_stable_deps() {
         add-apt-repository "ppa:$STABLE_PPA" || return 1
     fi
 
+    __PACKAGES=""
     if [ ! "$(echo "$STABLE_REV" | egrep '^(2015\.8|latest)$')" = "" ]; then
         # We need a recent tornado package
         __REQUIRED_TORNADO="tornado >= 4.0"
         check_pip_allowed "You need to allow pip based installations (-P) in order to install the python package '${__REQUIRED_TORNADO}'"
         if [ "$(which pip)" = "" ]; then
-            __apt_get_install_noinput python-setuptools python-pip
+            __PACKAGES="${__PACKAGES} python-setuptools python-pip"
         fi
+        __PACKAGES="${__PACKAGES} python-dev"
+        # shellcheck disable=SC2086
+        __apt_get_install_noinput $__PACKAGES
         pip install -U "${__REQUIRED_TORNADO}"
     fi
 
@@ -1944,19 +1947,19 @@ install_ubuntu_git_deps() {
 
     __git_clone_and_checkout || return 1
 
+    __PACKAGES=""
     if [ -f "${__SALT_GIT_CHECKOUT_DIR}/requirements/base.txt" ]; then
         # We're on the develop branch, install whichever tornado is on the requirements file
         __REQUIRED_TORNADO="$(grep tornado "${__SALT_GIT_CHECKOUT_DIR}/requirements/base.txt")"
         if [ "${__REQUIRED_TORNADO}" != "" ]; then
+            __PACKAGES="${__PACKAGES} python-dev"
             check_pip_allowed "You need to allow pip based installations (-P) in order to install the python package '${__REQUIRED_TORNADO}'"
             if [ "$(which pip)" = "" ]; then
-                [ -f get-pip.py ] && python get-pip.py || wget $_WGET_ARGS -q ${__GET_PIP_URLFILE} -O - | python
-                #__apt_get_install_noinput python-setuptools python-pip
+                __PACKAGES="${__PACKAGES} python-setuptools python-pip"
             fi
-
-            pip install --upgrade ${_BASE_PIP_PACKAGES}
-            pip install -U "'${__REQUIRED_TORNADO}'"
-
+            # shellcheck disable=SC2086
+            __apt_get_install_noinput $__PACKAGES
+            pip install -U "${__REQUIRED_TORNADO}"
         fi
     fi
 
@@ -2477,6 +2480,7 @@ install_debian_git_deps() {
         __REQUIRED_TORNADO="$(grep tornado "${__SALT_GIT_CHECKOUT_DIR}/requirements/base.txt")"
         if [ "${__REQUIRED_TORNADO}" != "" ]; then
             check_pip_allowed "You need to allow pip based installations (-P) in order to install the python package '${__REQUIRED_TORNADO}'"
+            __apt_get_install_noinput python-dev
             pip install -U "${__REQUIRED_TORNADO}" || return 1
         fi
     fi

@@ -1089,7 +1089,7 @@ def comment_line(path,
                 regex.lstrip('^').rstrip('$'),
                 '$' if regex.endswith('$') else '')
     else:
-        regex = '^{0}({1}){2}'.format(
+        regex = r'^{0}\s*({1}){2}'.format(
                 char,
                 regex.lstrip('^').rstrip('$'),
                 '$' if regex.endswith('$') else '')
@@ -3954,12 +3954,9 @@ def manage_file(name,
             if not sfn:
                 return _error(
                     ret, 'Source file {0!r} not found'.format(source))
-            # If the downloaded file came from a non salt server source verify
-            # that it matches the intended sum value
-            if _urlparse(source).scheme != 'salt':
-                # Skip the checksum verification by presetting a simple hash_type
-                if skip_verify:
-                    source_sum['hash_type'] = 'md5'
+            # If the downloaded file came from a non salt server or local source
+            #  verify that it matches the intended sum value
+            if _urlparse(source).scheme not in ('salt', ''):
                 dl_sum = get_hash(sfn, source_sum['hash_type'])
                 # Skip the checksum verification by presetting a simple hash value
                 if skip_verify:

@@ -70,8 +70,8 @@ Available Functions
         docker.running:
           - container: mysuperdocker
           - image: corp/mysuperdocker_img
-          - ports:
-              "5000/tcp":
+          - port_bindings:
+            - "5000/tcp":
                   HostIp: ""
                   HostPort: "5000"
 
@@ -606,7 +606,7 @@ def installed(name,
               detach=True,
               stdin_open=False,
               tty=False,
-              mem_limit=0,
+              mem_limit=None,
               ports=None,
               environment=None,
               dns=None,
@@ -923,7 +923,7 @@ def running(name,
             detach=True,
             stdin_open=False,
             tty=False,
-            mem_limit=0,
+            mem_limit=None,
             ports=None,
             environment=None,
             dns=None,

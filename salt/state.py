@@ -217,8 +217,8 @@ def format_log(ret):
                             new = chg[pkg]['new']
                             if not new and new not in (False, None):
                                 new = 'absent'
-                            msg += '{0} changed from {1} to ' \
-                                   '{2}\n'.format(pkg, old, new)
+                            msg += '{0!r} changed from {1!r} to ' \
+                                   '{2!r}\n'.format(pkg, old, new)
             if not msg:
                 msg = str(ret['changes'])
             if ret['result'] is True or ret['result'] is None:
@@ -257,9 +257,9 @@ class Compiler(object):
     '''
     Class used to compile and manage the High Data structure
     '''
-    def __init__(self, opts):
+    def __init__(self, opts, renderers):
         self.opts = opts
-        self.rend = salt.loader.render(self.opts, {})
+        self.rend = renderers
 
     # We need __setstate__ and __getstate__ to avoid pickling errors since
     # 'self.rend' contains a function reference which is not picklable.
@@ -607,6 +607,7 @@ class State(object):
         self.__run_num = 0
         self.jid = jid
         self.instance_id = str(id(self))
+        self.inject_globals = {}
 
     def _gather_pillar(self):
         '''
@@ -730,6 +731,12 @@ class State(object):
                 ret.update({'comment': 'check_cmd determined the state failed', 'result': False})
                 return ret
         return ret
+
+    def reset_run_num(self):
+        '''
+        Rest the run_num value to 0
+        '''
+        self.__run_num = 0
 
     def load_modules(self, data=None):
         '''
@@ -1551,6 +1558,9 @@ class State(object):
             '__lowstate__': immutabletypes.freeze(chunks) if chunks else {}
         }
 
+        if self.inject_globals:
+            inject_globals.update(self.inject_globals)
+
         if low.get('__prereq__'):
             test = sys.modules[self.states[cdata['full']].__module__].__opts__['test']
             sys.modules[self.states[cdata['full']].__module__].__opts__['test'] = True
@@ -1636,8 +1646,9 @@ class State(object):
         ret['start_time'] = start_time.time().isoformat()
         delta = (finish_time - start_time)
         # duration in milliseconds.microseconds
-        ret['duration'] = (delta.seconds * 1000000 + delta.microseconds)/1000.0
-        log.info('Completed state [{0}] at time {1}'.format(low['name'], finish_time.time().isoformat()))
+        duration = (delta.seconds * 1000000 + delta.microseconds)/1000.0
+        ret['duration'] = duration
+        log.info('Completed state [{0}] at time {1} duration_in_ms={2}'.format(low['name'], finish_time.time().isoformat(), duration))
         return ret
 
     def call_chunks(self, chunks):
@@ -2305,6 +2316,7 @@ class BaseHighState(object):
                 'state_auto_order',
                 opts['state_auto_order'])
             opts['file_roots'] = mopts['file_roots']
+            opts['env_order'] = mopts['env_order']
             opts['state_events'] = mopts.get('state_events')
             opts['state_aggregate'] = mopts.get('state_aggregate', opts.get('state_aggregate', False))
             opts['jinja_lstrip_blocks'] = mopts.get('jinja_lstrip_blocks', False)
@@ -2315,10 +2327,28 @@ class BaseHighState(object):
         '''
         Pull the file server environments out of the master options
         '''
-        envs = set(['base'])
+        envs = ['base']
         if 'file_roots' in self.opts:
-            envs.update(list(self.opts['file_roots']))
-        return envs.union(set(self.client.envs()))
+            envs.extend(list(self.opts['file_roots']))
+        client_envs = self.client.envs()
+        env_order = self.opts.get('env_order', [])
+        client_envs = self.client.envs()
+        if env_order and client_envs:
+            client_env_list = self.client.envs()
+            env_intersection = set(env_order).intersection(client_env_list)
+            final_list = []
+            for ord_env in env_order:
+                if ord_env in env_intersection:
+                    final_list.append(ord_env)
+            return set(final_list)
+
+        elif env_order:
+            return set(env_order)
+        else:
+            for cenv in client_envs:
+                if cenv not in envs:
+                    envs.append(cenv)
+            return set(envs)
 
     def get_tops(self):
         '''
@@ -2329,6 +2359,13 @@ class BaseHighState(object):
         done = DefaultOrderedDict(list)
         found = 0  # did we find any contents in the top files?
         # Gather initial top files
+        if self.opts['top_file_merging_strategy'] == 'same' and \
+        not self.opts['environment']:
+            if not self.opts['default_top']:
+                raise SaltRenderError('Top file merge strategy set to same, but no default_top '
+                          'configuration option was set')
+            self.opts['environment'] = self.opts['default_top']
+
         if self.opts['environment']:
             contents = self.client.cache_file(
                 self.opts['state_top'],
@@ -2344,7 +2381,7 @@ class BaseHighState(object):
                     saltenv=self.opts['environment']
                 )
             ]
-        else:
+        elif self.opts['top_file_merging_strategy'] == 'merge':
             found = 0
             if self.opts.get('state_top_saltenv', False):
                 saltenv = self.opts['state_top_saltenv']
@@ -2675,6 +2712,8 @@ class BaseHighState(object):
                         inc_sls = '.'.join(p_comps[:-level_count] + [include])
 
                     if env_key != xenv_key:
+                        if matches is None:
+                            matches = []
                         # Resolve inc_sls in the specified environment
                         if env_key in matches or fnmatch.filter(self.avail[env_key], inc_sls):
                             resolved_envs = [env_key]

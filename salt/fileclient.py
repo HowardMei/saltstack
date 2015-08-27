@@ -6,6 +6,7 @@ from __future__ import absolute_import
 
 # Import python libs
 import contextlib
+import errno
 import logging
 import hashlib
 import os
@@ -102,10 +103,10 @@ class Client(object):
             # Backwards compatibility
             saltenv = env
 
-        dest = os.path.join(self.opts['cachedir'],
-                            'files',
-                            saltenv,
-                            path)
+        dest = salt.utils.path_join(self.opts['cachedir'],
+                                    'files',
+                                    saltenv,
+                                    path)
         destdir = os.path.dirname(dest)
         cumask = os.umask(63)
         if not os.path.isdir(destdir):
@@ -593,35 +594,51 @@ class Client(object):
             get_kwargs['auth'] = (url_data.username, url_data.password)
         else:
             fixed_url = url
+
+        destfp = None
         try:
+            if no_cache:
+                result = []
+
+                def on_chunk(chunk):
+                    result.append(chunk)
+            else:
+                dest_tmp = "{0}.part".format(dest)
+                destfp = salt.utils.fopen(dest_tmp, 'wb')
+
+                def on_chunk(chunk):
+                    destfp.write(chunk)
+
             query = salt.utils.http.query(
                 fixed_url,
                 stream=True,
+                streaming_callback=on_chunk,
                 username=url_data.username,
                 password=url_data.password,
                 **get_kwargs
             )
             if 'handle' not in query:
                 raise MinionError('Error: {0}'.format(query['error']))
-            response = query['handle']
-            chunk_size = 32 * 1024
-            if not no_cache:
-                with salt.utils.fopen(dest, 'wb') as destfp:
-                    if hasattr(response, 'iter_content'):
-                        for chunk in response.iter_content(chunk_size=chunk_size):
-                            destfp.write(chunk)
-                    else:
-                        while True:
-                            chunk = response.buffer.read(chunk_size)
-                            destfp.write(chunk)
-                            if len(chunk) < chunk_size:
-                                break
-                return dest
+            if no_cache:
+                return ''.join(result)
             else:
-                if hasattr(response, 'text'):
-                    return response.text
-                else:
-                    return response['text']
+                destfp.close()
+                destfp = None
+                # Can't just do an os.rename() here, this results in a
+                # WindowsError being raised when the destination path exists on
+                # a Windows machine. Have to remove the file.
+                try:
+                    os.remove(dest)
+                except OSError as exc:
+                    if exc.errno != errno.ENOENT:
+                        raise MinionError(
+                            'Error: Unable to remove {0}: {1}'.format(
+                                dest,
+                                exc.strerror
+                            )
+                        )
+                os.rename(dest_tmp, dest)
+                return dest
         except HTTPError as exc:
             raise MinionError('HTTP error {0} reading {1}: {3}'.format(
                 exc.code,
@@ -629,6 +646,9 @@ class Client(object):
                 *BaseHTTPServer.BaseHTTPRequestHandler.responses[exc.code]))
         except URLError as exc:
             raise MinionError('Error reading {0}: {1}'.format(url, exc.reason))
+        finally:
+            if destfp is not None:
+                destfp.close()
 
     def get_template(
             self,

@@ -186,9 +186,10 @@ class SaltEvent(object):
         if salt.utils.is_windows() and not hasattr(opts, 'ipc_mode'):
             opts['ipc_mode'] = 'tcp'
         self.puburi, self.pulluri = self.__load_uri(sock_dir, node)
-        if listen:
-            self.subscribe()
+        self.pending_tags = []
         self.pending_events = []
+        if not self.cpub:
+            self.connect_pub()
         self.__load_cache_regex()
 
     @classmethod
@@ -258,17 +259,36 @@ class SaltEvent(object):
         )
         return puburi, pulluri
 
-    def subscribe(self, tag=None):
+    def subscribe(self, tag, match_type=None):
         '''
         Subscribe to events matching the passed tag.
-        '''
-        if not self.cpub:
-            self.connect_pub()
 
-    def unsubscribe(self, tag=None):
+        If you do not subscribe to a tag, events will be discarded by calls to
+        get_event that request a different tag. In contexts where many different
+        jobs are outstanding it is important to subscribe to prevent one call
+        to get_event from discarding a response required by a subsequent call
+        to get_event.
+        '''
+        match_func = self._get_match_func(match_type)
+
+        self.pending_tags.append([tag, match_func])
+
+        return
+
+    def unsubscribe(self, tag, match_type=None):
         '''
         Un-subscribe to events matching the passed tag.
         '''
+        match_func = self._get_match_func(match_type)
+
+        self.pending_tags.remove([tag, match_func])
+
+        old_events = self.pending_events
+        self.pending_events = []
+        for evt in old_events:
+            if any(pmatch_func(evt['tag'], ptag) for ptag, pmatch_func in self.pending_tags):
+                self.pending_events.append(evt)
+
         return
 
     def connect_pub(self):
@@ -308,13 +328,13 @@ class SaltEvent(object):
             match_type = self.opts.get('event_match_type', 'startswith')
         return getattr(self, '_match_tag_{0}'.format(match_type), None)
 
-    def _check_pending(self, tag, pending_tags, match_func=None):
+    def _check_pending(self, tag, match_func=None):
         """Check the pending_events list for events that match the tag
 
         :param tag: The tag to search for
         :type tag: str
-        :param pending_tags: List of tags to preserve
-        :type pending_tags: list[str]
+        :param tags_regex: List of re expressions to search for also
+        :type tags_regex: list[re.compile()]
         :return:
         """
         if match_func is None:
@@ -326,10 +346,13 @@ class SaltEvent(object):
             if match_func(evt['tag'], tag):
                 if ret is None:
                     ret = evt
+                    log.trace('get_event() returning cached event = {0}'.format(ret))
                 else:
                     self.pending_events.append(evt)
-            elif any(match_func(evt['tag'], ptag) for ptag in pending_tags):
+            elif any(pmatch_func(evt['tag'], ptag) for ptag, pmatch_func in self.pending_tags):
                 self.pending_events.append(evt)
+            else:
+                log.trace('get_event() discarding cached event that no longer has any subscriptions = {0}'.format(evt))
         return ret
 
     def _match_tag_startswith(self, event_tag, search_tag):
@@ -364,7 +387,7 @@ class SaltEvent(object):
         '''
         return self.cache_regex.get(search_tag).search(event_tag) is not None
 
-    def _get_event(self, wait, tag, pending_tags, match_func=None):
+    def _get_event(self, wait, tag, match_func=None):
         if match_func is None:
             match_func = self._get_match_func()
         start = time.time()
@@ -387,8 +410,10 @@ class SaltEvent(object):
                 else:
                     raise
 
-            if not match_func(ret['tag'], tag):     # tag not match
-                if any(match_func(ret['tag'], ptag) for ptag in pending_tags):
+            if not match_func(ret['tag'], tag):
+                # tag not match
+                if any(pmatch_func(ret['tag'], ptag) for ptag, pmatch_func in self.pending_tags):
+                    log.trace('get_event() caching unwanted event = {0}'.format(ret))
                     self.pending_events.append(ret)
                 if wait:  # only update the wait timeout if we had one
                     wait = timeout_at - time.time()
@@ -396,11 +421,10 @@ class SaltEvent(object):
 
             log.trace('get_event() received = {0}'.format(ret))
             return ret
-
+        log.trace('_get_event() waited {0} seconds and received nothing'.format(wait * 1000))
         return None
 
-    def get_event(self, wait=5, tag='', full=False, use_pending=False,
-                  pending_tags=None, match_type=None):
+    def get_event(self, wait=5, tag='', full=False, match_type=None):
         '''
         Get a single publication.
         IF no publication available THEN block for up to wait seconds
@@ -408,21 +432,11 @@ class SaltEvent(object):
 
         IF wait is 0 then block forever.
 
-        New in Boron always checks the list of pending events
-
-        New in @TBD optionally set match_type
-
-        use_pending
-            Defines whether to keep all unconsumed events in a pending_events
-            list, or to discard events that don't match the requested tag.  If
-            set to True, MAY CAUSE MEMORY LEAKS.
-
-        pending_tags
-            Add any events matching the listed tags to the pending queue.
-            Still MAY CAUSE MEMORY LEAKS but less likely than use_pending
-            assuming you later get_event for the tags you've listed here
-
-            New in Boron
+        tag
+            Only return events matching the given tag. If not specified, or set
+            to an empty string, all events are returned. It is recommended to
+            always be selective on what is to be returned in the event that
+            multiple requests are being multiplexed
 
         match_type
             Set the function to match the search tag with event tags.
@@ -432,18 +446,28 @@ class SaltEvent(object):
              - 'regex' : regex search '^' + tag event tags
             Default is opts['event_match_type'] or 'startswith'
 
-            New in @TBD
+            .. versionadded:: Boron
+
+        Notes:
+
+        Searches cached publications first. If no cached publications are found
+        that match the given tag specification, new publications are received
+        and checked.
+
+        If a publication is received that does not match the tag specification,
+        it is DISCARDED unless it is subscribed to via subscribe() which will
+        cause it to be cached.
+
+        If a caller is not going to call get_event immediately after sending a
+        request, it MUST subscribe the result to ensure the response is not lost
+        should other regions of code call get_event for other purposes.
         '''
 
         match_func = self._get_match_func(match_type)
-        if use_pending:
-            pending_tags = ['']
-        elif pending_tags is None:
-            pending_tags = []
 
-        ret = self._check_pending(tag, pending_tags, match_func)
+        ret = self._check_pending(tag, match_func)
         if ret is None:
-            ret = self._get_event(wait, tag, pending_tags, match_func)
+            ret = self._get_event(wait, tag, match_func)
 
         if ret is None or full:
             return ret

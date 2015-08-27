@@ -19,11 +19,10 @@ option. This will give users a couple release cycles to modify their scripts,
 SLS files, etc. to use the new functionality, rather than forcing users to
 change everything immediately.
 
-In the **Carbon** release of Salt (slated for late summer/early fall 2015),
-this execution module will take the place of the default Docker execution
-module, and backwards-compatible naming will be maintained for a couple
-releases after that to allow users time to replace references to ``dockerng``
-with ``docker``.
+In the **Carbon** release of Salt (due early 2016), this execution module will
+take the place of the default Docker execution module, and backwards-compatible
+naming will be maintained for a couple releases after that to allow users time
+to replace references to ``dockerng`` with ``docker``.
 
 
 Installation Prerequisites
@@ -656,6 +655,11 @@ def _get_client(timeout=None):
         if 'base_url' not in client_kwargs and 'DOCKER_HOST' in os.environ:
             # Check if the DOCKER_HOST environment variable has been set
             client_kwargs['base_url'] = os.environ.get('DOCKER_HOST')
+
+        if 'version' not in client_kwargs:
+            # Let docker-py auto detect docker version incase
+            # it's not defined by user.
+            client_kwargs['version'] = 'auto'
 
         __context__['docker.client'] = docker.Client(**client_kwargs)
 
@@ -2275,7 +2279,7 @@ def ps_(**kwargs):
                 continue
             for item in container:
                 c_state = 'running' \
-                    if container['Status'].lower().startswith('up ') \
+                    if container.get('Status', '').lower().startswith('up ') \
                     else 'stopped'
                 bucket = __context__.setdefault('docker.ps', {}).setdefault(
                     c_state, {})
@@ -2653,6 +2657,16 @@ def create(image,
             val = VALID_CREATE_OPTS[key]
             if 'api_name' in val:
                 create_kwargs[val['api_name']] = create_kwargs.pop(key)
+
+    # Added to manage api change in 1.19.
+    # mem_limit and memswap_limit must be provided in host_config object
+    if salt.utils.version_cmp(version()['ApiVersion'], '1.18') == 1:
+        create_kwargs['host_config'] = docker.utils.create_host_config(mem_limit=create_kwargs.get('mem_limit'),
+                                                                       memswap_limit=create_kwargs.get('memswap_limit'))
+        if 'mem_limit' in create_kwargs:
+            del create_kwargs['mem_limit']
+        if 'memswap_limit' in create_kwargs:
+            del create_kwargs['memswap_limit']
 
     log.debug(
         'dockerng.create is using the following kwargs to create '

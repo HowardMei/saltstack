@@ -50,10 +50,22 @@ __virtualname__ = 'pkg'
 
 def __virtual__():
     '''
-    Load as 'pkg' on FreeBSD 10 and greater
+    Load as 'pkg' on FreeBSD 10 and greater.
+    Load as 'pkg' on FreeBSD 9 when config option
+    ``providers:pkg`` is set to 'pkgng'.
     '''
     if __grains__['os'] == 'FreeBSD' and float(__grains__['osrelease']) >= 10:
         return __virtualname__
+    if __grains__['os'] == 'FreeBSD' and \
+            float(__grains__['osmajorrelease']) == 9:
+        providers = {}
+        if 'providers' in __opts__:
+            providers = __opts__['providers']
+        log.debug('__opts__.providers: {0}'.format(providers))
+        if providers and 'pkg' in providers and providers['pkg'] == 'pkgng':
+            log.debug('Configuration option \'providers:pkg\' is set to '
+                '\'pkgng\', using \'pkgng\' in favor of \'freebsdpkg\'.')
+            return __virtualname__
     return False
 
 
@@ -725,7 +737,7 @@ def install(name=None,
         opts += 'U'
     if salt.utils.is_true(dryrun):
         opts += 'n'
-    if not salt.utils.is_true(dryrun) and pkg_type != 'file':
+    if not salt.utils.is_true(dryrun):
         opts += 'y'
     if salt.utils.is_true(quiet):
         opts += 'q'
@@ -884,8 +896,17 @@ def remove(name=None,
     except MinionError as exc:
         raise CommandExecutionError(exc)
 
-    old = list_pkgs(jail=jail, chroot=chroot)
-    targets = [x for x in pkg_params if x in old]
+    targets = []
+    old = list_pkgs(jail=jail, chroot=chroot, with_origin=True)
+    for pkg in pkg_params.items():
+        # FreeBSD pkg supports `openjdk` and `java/openjdk7` package names
+        if pkg[0].find("/") > 0:
+            origin = pkg[0]
+            pkg = [k for k, v in old.iteritems() if v['origin'] == origin][0]
+
+        if pkg[0] in old:
+            targets.append(pkg[0])
+
     if not targets:
         return {}
 
@@ -915,7 +936,7 @@ def remove(name=None,
     __salt__['cmd.run'](cmd, python_shell=False, output_loglevel='trace')
     __context__.pop(_contextkey(jail, chroot), None)
     __context__.pop(_contextkey(jail, chroot, prefix='pkg.origin'), None)
-    new = list_pkgs(jail=jail, chroot=chroot)
+    new = list_pkgs(jail=jail, chroot=chroot, with_origin=True)
     return salt.utils.compare_dicts(old, new)
 
 # Support pkg.delete to remove packages, since this is the CLI usage
