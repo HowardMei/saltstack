@@ -362,6 +362,8 @@ def salt_api_acl_tool(username, request):
                         - 1.1.1.2
                     foo:
                         - 8.8.4.4
+                    bar:
+                        - '*'
 
     :param username: Username to check against the API.
     :type username: str
@@ -390,14 +392,14 @@ def salt_api_acl_tool(username, request):
         users = acl.get('users', {})
         if users:
             if username in users:
-                if ip in users[username]:
+                if ip in users[username] or '*' in users[username]:
                     logger.info(success_str.format(username, ip))
                     return True
                 else:
                     logger.info(failure_str.format(username, ip))
                     return False
             elif username not in users and '*' in users:
-                if ip in users['*']:
+                if ip in users['*'] or '*' in users['*']:
                     logger.info(success_str.format(username, ip))
                     return True
                 else:
@@ -902,7 +904,7 @@ class LowDataAdapter(object):
                     -d arg='du -sh .' \\
                     -d arg='/path/to/dir'
 
-            # Sending posiitonal args and Keyword args with JSON:
+            # Sending positional args and Keyword args with JSON:
             echo '[
                 {
                     "client": "local",
@@ -1078,6 +1080,9 @@ class Jobs(LowDataAdapter):
         .. http:get:: /jobs/(jid)
 
             List jobs or show a single job from the job cache.
+
+            :reqheader X-Auth-Token: |req_token|
+            :reqheader Accept: |req_accept|
 
             :status 200: |200|
             :status 401: |401|
@@ -1521,19 +1526,18 @@ class Login(LowDataAdapter):
         try:
             eauth = self.opts.get('external_auth', {}).get(token['eauth'], {})
 
+            # Get sum of '*' perms, user-specific perms, and group-specific perms
+            perms = eauth.get(token['name'], [])
+            perms.extend(eauth.get('*', []))
+
             if 'groups' in token:
                 user_groups = set(token['groups'])
                 eauth_groups = set([i.rstrip('%') for i in eauth.keys() if i.endswith('%')])
 
-                perms = []
                 for group in user_groups & eauth_groups:
                     perms.extend(eauth['{0}%'.format(group)])
 
-                perms = perms or None
-            else:
-                perms = eauth.get(token['name'], eauth.get('*'))
-
-            if perms is None:
+            if not perms:
                 raise ValueError("Eauth permission list not found.")
         except (AttributeError, IndexError, KeyError, ValueError):
             logger.debug("Configuration for external_auth malformed for "

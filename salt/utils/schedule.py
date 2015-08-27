@@ -359,6 +359,7 @@ class Schedule(object):
                 if name in self.opts['pillar']['schedule']:
                     del self.opts['pillar']['schedule'][name]
             schedule = self.opts['pillar']['schedule']
+            log.warn('Pillar schedule deleted. Pillar refresh recommended. Run saltutil.refresh_pillar.')
 
         # Fire the complete event back along with updated list of schedule
         evt = salt.utils.event.get_event('minion', opts=self.opts, listen=False)
@@ -385,6 +386,12 @@ class Schedule(object):
             raise ValueError('Scheduled jobs have to be of type dict.')
         if not len(data) == 1:
             raise ValueError('You can only schedule one new job at a time.')
+
+        # if enabled is not included in the job,
+        # assume job is enabled.
+        for job in data.keys():
+            if 'enabled' not in data[job]:
+                data[job]['enabled'] = True
 
         new_job = next(six.iterkeys(data))
 

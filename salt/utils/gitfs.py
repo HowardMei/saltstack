@@ -68,6 +68,10 @@ except ImportError:
 try:
     import pygit2
     HAS_PYGIT2 = True
+    try:
+        GitError = pygit2.errors.GitError
+    except AttributeError:
+        GitError = Exception
 except ImportError:
     HAS_PYGIT2 = False
 
@@ -83,6 +87,14 @@ except ImportError:
 # pylint: enable=import-error
 
 log = logging.getLogger(__name__)
+
+# Minimum versions for backend providers
+GITPYTHON_MINVER = '0.3'
+PYGIT2_MINVER = '0.20.3'
+LIBGIT2_MINVER = '0.20.0'
+# dulwich.__version__ is a versioninfotuple so we can compare tuples
+# instead of using distutils.version.LooseVersion
+DULWICH_MINVER = (0, 9, 4)
 
 
 def failhard(role):
@@ -175,6 +187,12 @@ class GitProvider(object):
             self.id = remote
             self.get_url()
 
+        # Winrepo doesn't support the 'root' option, but it still must be part
+        # of the GitProvider object because other code depends on it. Add it as
+        # an empty string.
+        if 'root' not in repo_conf:
+            repo_conf['root'] = ''
+
         # Set all repo config params as attributes
         for key, val in six.iteritems(repo_conf):
             setattr(self, key, val)
@@ -212,15 +230,15 @@ class GitProvider(object):
             log.critical(msg, exc_info_on_loglevel=logging.DEBUG)
             failhard(self.role)
 
-    def check_pillar_root(self):
+    def check_root(self):
         '''
         Check if the relative root path exists in the checked-out copy of the
         remote. Return the full path to that relative root if it does exist,
         otherwise return None.
         '''
-        pillar_root = os.path.join(self.cachedir, self.root)
-        if os.path.isdir(pillar_root):
-            return pillar_root
+        root_dir = os.path.join(self.cachedir, self.root).rstrip(os.sep)
+        if os.path.isdir(root_dir):
+            return root_dir
         log.error(
             'Root path \'{0}\' not present in {1} remote \'{2}\', '
             'skipping.'.format(self.root, self.role, self.id)
@@ -350,10 +368,10 @@ class GitProvider(object):
         '''
         Examine self.id and assign self.url (and self.branch, for git_pillar)
         '''
-        if self.role == 'git_pillar':
-            # With git_pillar, the remote is specified in the format
-            # "<branch> <url>", so that we can get a unique identifier to
-            # hash for each remote.
+        if self.role in ('git_pillar', 'winrepo'):
+            # With winrepo and git_pillar, the remote is specified in the
+            # format '<branch> <url>', so that we can get a unique identifier
+            # to hash for each remote.
             try:
                 self.branch, self.url = self.id.split(None, 1)
             except ValueError:
@@ -394,7 +412,7 @@ class GitPython(GitProvider):
                 self.repo.git.checkout(ref)
             except Exception:
                 continue
-            return self.check_pillar_root()
+            return self.check_root()
         log.error(
             'Failed to checkout {0} from {1} remote \'{2}\': remote ref does '
             'not exist'.format(self.branch, self.role, self.id)
@@ -578,19 +596,21 @@ class GitPython(GitProvider):
             except KeyError:
                 # File not found or repo_path points to a directory
                 break
-        return blob, blob.hexsha
+        return blob, blob.hexsha if blob is not None else blob
 
     def get_tree(self, tgt_env):
         '''
         Return a git.Tree object if the branch/tag/SHA is found, otherwise None
         '''
         if tgt_env == 'base':
-            tgt_env = self.base
+            tgt_ref = self.base
+        else:
+            tgt_ref = tgt_env
         for ref in self.repo.refs:
             if isinstance(ref, (git.RemoteReference, git.TagReference)):
                 parted = ref.name.partition('/')
                 rspec = parted[2] if parted[2] else parted[0]
-                if rspec == tgt_env:
+                if rspec == tgt_ref:
                     return ref.commit.tree
 
         # Branch or tag not matched, check if 'tgt_env' is a commit
@@ -598,7 +618,7 @@ class GitPython(GitProvider):
             return None
 
         try:
-            commit = self.repo.rev_parse(tgt_env)
+            commit = self.repo.rev_parse(tgt_ref)
             return commit.tree
         except gitdb.exc.ODBError:
             return None
@@ -646,10 +666,10 @@ class Pygit2(GitProvider):
                 self.repo.checkout(local_ref)
                 # Reset HEAD to the commit id of the remote ref
                 self.repo.reset(oid, pygit2.GIT_RESET_HARD)
-                return self.check_pillar_root()
+                return self.check_root()
             elif tag_ref in refs:
                 self.repo.checkout(tag_ref)
-                return self.check_pillar_root()
+                return self.check_root()
         except Exception as exc:
             log.error(
                 'Failed to checkout {0} from {1} remote \'{2}\': {3}'.format(
@@ -823,7 +843,7 @@ class Pygit2(GitProvider):
             origin.credentials = credentials
         try:
             fetch_results = origin.fetch()
-        except pygit2.errors.GitError as exc:
+        except GitError as exc:
             # Using exc.__str__() here to avoid deprecation warning
             # when referencing exc.message
             if 'unsupported url protocol' in exc.__str__().lower() \
@@ -933,7 +953,7 @@ class Pygit2(GitProvider):
                     blob = self.repo[oid]
             except KeyError:
                 break
-        return blob, blob.hex
+        return blob, blob.hex if blob is not None else blob
 
     def get_tree(self, tgt_env):
         '''
@@ -941,20 +961,22 @@ class Pygit2(GitProvider):
         None
         '''
         if tgt_env == 'base':
-            tgt_env = self.base
+            tgt_ref = self.base
+        else:
+            tgt_ref = tgt_env
         for ref in self.repo.listall_references():
             _, rtype, rspec = ref.split('/', 2)
             if rtype in ('remotes', 'tags'):
                 parted = rspec.partition('/')
                 rspec = parted[2] if parted[2] else parted[0]
-                if rspec == tgt_env and self.env_is_exposed(rspec):
+                if rspec == tgt_ref and self.env_is_exposed(tgt_env):
                     return self.repo.lookup_reference(ref).get_object().tree
 
         # Branch or tag not matched, check if 'tgt_env' is a commit
         if not self.env_is_exposed(tgt_env):
             return None
         try:
-            commit = self.repo.revparse_single(tgt_env)
+            commit = self.repo.revparse_single(tgt_ref)
         except (KeyError, TypeError):
             # Not a valid commit, likely not a commit SHA
             pass
@@ -1271,7 +1293,7 @@ class Dulwich(GitProvider):  # pylint: disable=abstract-method
                     break
             except KeyError:
                 break
-        return blob, blob.sha().hexdigest()
+        return blob, blob.sha().hexdigest() if blob is not None else blob
 
     def get_conf(self):
         '''
@@ -1293,13 +1315,15 @@ class Dulwich(GitProvider):  # pylint: disable=abstract-method
         otherwise None
         '''
         if tgt_env == 'base':
-            tgt_env = self.base
+            tgt_ref = self.base
+        else:
+            tgt_ref = tgt_env
         refs = self.repo.get_refs()
         # Sorting ensures we check heads (branches) before tags
         for ref in sorted(self.get_env_refs(refs)):
             # ref will be something like 'refs/heads/master'
             rtype, rspec = ref[5:].split('/', 1)
-            if rspec == tgt_env and self.env_is_exposed(rspec):
+            if rspec == tgt_ref and self.env_is_exposed(tgt_env):
                 if rtype == 'heads':
                     commit = self.repo.get_object(refs[ref])
                 elif rtype == 'tags':
@@ -1324,14 +1348,14 @@ class Dulwich(GitProvider):  # pylint: disable=abstract-method
         if not self.env_is_exposed(tgt_env):
             return None
         try:
-            int(tgt_env, 16)
+            int(tgt_ref, 16)
         except ValueError:
             # Not hexidecimal, likely just a non-matching environment
             return None
 
         try:
-            if len(tgt_env) == 40:
-                sha_obj = self.repo.get_object(tgt_env)
+            if len(tgt_ref) == 40:
+                sha_obj = self.repo.get_object(tgt_ref)
                 if isinstance(sha_obj, dulwich.objects.Commit):
                     sha_commit = sha_obj
             else:
@@ -1339,12 +1363,12 @@ class Dulwich(GitProvider):  # pylint: disable=abstract-method
                     x for x in (
                         self.repo.get_object(y)
                         for y in self.repo.object_store
-                        if y.startswith(tgt_env)
+                        if y.startswith(tgt_ref)
                     )
                     if isinstance(x, dulwich.objects.Commit)
                 ])
                 if len(matches) > 1:
-                    log.warning('Ambiguous commit ID \'{0}\''.format(tgt_env))
+                    log.warning('Ambiguous commit ID \'{0}\''.format(tgt_ref))
                     return None
                 try:
                     sha_commit = matches.pop()
@@ -1437,11 +1461,14 @@ class GitBase(object):
     '''
     Base class for gitfs/git_pillar
     '''
-    def __init__(self, opts, valid_providers=VALID_PROVIDERS):
+    def __init__(self, opts, valid_providers=VALID_PROVIDERS, cache_root=None):
         self.opts = opts
         self.valid_providers = valid_providers
         self.get_provider()
-        self.cache_root = os.path.join(self.opts['cachedir'], self.role)
+        if cache_root is not None:
+            self.cache_root = cache_root
+        else:
+            self.cache_root = os.path.join(self.opts['cachedir'], self.role)
         self.env_cache = os.path.join(self.cache_root, 'envs.p')
         self.hash_cachedir = os.path.join(
             self.cache_root, self.role, 'hash')
@@ -1782,15 +1809,14 @@ class GitBase(object):
 
         # pylint: disable=no-member
         gitver = distutils.version.LooseVersion(git.__version__)
-        minver_str = '0.3.0'
-        minver = distutils.version.LooseVersion(minver_str)
+        minver = distutils.version.LooseVersion(GITPYTHON_MINVER)
         # pylint: enable=no-member
         errors = []
         if gitver < minver:
             errors.append(
                 'Git fileserver backend is enabled in master config file, but '
                 'the GitPython version is earlier than {0}. Version {1} '
-                'detected.'.format(minver_str, git.__version__)
+                'detected.'.format(GITPYTHON_MINVER, git.__version__)
             )
         if not salt.utils.which('git'):
             errors.append(
@@ -1834,12 +1860,10 @@ class GitBase(object):
 
         # pylint: disable=no-member
         pygit2ver = distutils.version.LooseVersion(pygit2.__version__)
-        pygit2_minver_str = '0.20.3'
-        pygit2_minver = distutils.version.LooseVersion(pygit2_minver_str)
+        pygit2_minver = distutils.version.LooseVersion(PYGIT2_MINVER)
 
         libgit2ver = distutils.version.LooseVersion(pygit2.LIBGIT2_VERSION)
-        libgit2_minver_str = '0.20.0'
-        libgit2_minver = distutils.version.LooseVersion(libgit2_minver_str)
+        libgit2_minver = distutils.version.LooseVersion(LIBGIT2_MINVER)
         # pylint: enable=no-member
 
         errors = []
@@ -1847,13 +1871,13 @@ class GitBase(object):
             errors.append(
                 'Git fileserver backend is enabled in master config file, but '
                 'pygit2 version is earlier than {0}. Version {1} detected.'
-                .format(pygit2_minver_str, pygit2.__version__)
+                .format(PYGIT2_MINVER, pygit2.__version__)
             )
         if libgit2ver < libgit2_minver:
             errors.append(
                 'Git fileserver backend is enabled in master config file, but '
                 'libgit2 version is earlier than {0}. Version {1} detected.'
-                .format(libgit2_minver_str, pygit2.LIBGIT2_VERSION)
+                .format(LIBGIT2_MINVER, pygit2.LIBGIT2_VERSION)
             )
         if not salt.utils.which('git'):
             errors.append(
@@ -1893,16 +1917,13 @@ class GitBase(object):
         elif 'dulwich' not in self.valid_providers:
             return False
 
-        dulwich_version = dulwich.__version__
-        dulwich_min_version = (0, 9, 4)
-
         errors = []
 
-        if dulwich_version < dulwich_min_version:
+        if dulwich.__version__ < DULWICH_MINVER:
             errors.append(
                 'Git fileserver backend is enabled in the master config file, but '
                 'the installed version of Dulwich is earlier than {0}. Version {1} '
-                'detected.'.format(dulwich_min_version, dulwich_version)
+                'detected.'.format(DULWICH_MINVER, dulwich.__version__)
             )
 
         if errors:
@@ -2218,7 +2239,6 @@ class GitPillar(GitBase):
                 else:
                     base_branch = self.opts['{0}_branch'.format(self.role)]
                     env = 'base' if repo.branch == base_branch else repo.branch
-                log.critical(env)
                 self.pillar_dirs[cachedir] = env
 
     def update(self):
@@ -2232,3 +2252,36 @@ class GitPillar(GitBase):
         and just run pillar.fetch_remotes() there.
         '''
         return self.fetch_remotes()
+
+
+class WinRepo(GitBase):
+    '''
+    Functionality specific to the winrepo runner
+    '''
+    def __init__(self, opts):
+        self.role = 'winrepo'
+        # Dulwich has no function to check out a branch/tag, so this will be
+        # limited to GitPython and Pygit2 for the forseeable future.
+        if 'win_repo' in opts:
+            salt.utils.warn_until(
+                'Nitrogen',
+                'The \'win_repo\' config option is deprecated, please use '
+                '\'winrepo_dir\' instead.'
+            )
+            winrepo_dir = opts['win_repo']
+        else:
+            winrepo_dir = opts['winrepo_dir']
+        GitBase.__init__(self,
+                         opts,
+                         valid_providers=('gitpython', 'pygit2'),
+                         cache_root=winrepo_dir)
+
+    def checkout(self):
+        '''
+        Checkout the targeted branches/tags from the winrepo remotes
+        '''
+        self.winrepo_dirs = {}
+        for repo in self.remotes:
+            cachedir = repo.checkout()
+            if cachedir is not None:
+                self.winrepo_dirs[repo.url] = cachedir

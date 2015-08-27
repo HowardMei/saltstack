@@ -16,6 +16,7 @@ import hashlib
 import imp
 import json
 import logging
+import numbers
 import os
 import pprint
 import random
@@ -1107,6 +1108,11 @@ def istextfile(fp_, blocksize=512):
     elif not block:
         # An empty file is considered a valid text file
         return True
+    try:
+        block.decode('utf-8')
+        return True
+    except UnicodeDecodeError:
+        pass
 
     nontext = block.translate(None, text_characters)
     return float(len(nontext)) / len(block) <= 0.30
@@ -1531,7 +1537,20 @@ def is_windows():
     '''
     Simple function to return if a host is Windows or not
     '''
-    return sys.platform.startswith('win')
+    import __main__ as main
+    # This is a hack.  If a proxy minion is started by other
+    # means, e.g. a custom script that creates the minion objects
+    # then this will fail.
+    is_proxy = False
+    try:
+        if 'salt-proxy' in main.__file__:
+            is_proxy = True
+    except AttributeError:
+        pass
+    if is_proxy:
+        return False
+    else:
+        return sys.platform.startswith('win')
 
 
 def sanitize_win_path_string(winpath):
@@ -1549,6 +1568,18 @@ def sanitize_win_path_string(winpath):
 
 
 @real_memoize
+def is_proxy():
+    '''
+    Return True if this minion is a proxy minion.
+    Leverages the fact that is_linux() and is_windows
+    both return False for proxies.
+    TODO: Need to extend this for proxies that might run on
+    other Unices
+    '''
+    return not (is_linux() or is_windows())
+
+
+@real_memoize
 def is_linux():
     '''
     Simple function to return if a host is Linux or not.
@@ -1560,7 +1591,7 @@ def is_linux():
     # then this will fail.
     is_proxy = False
     try:
-        if 'salt-proxy-minion' in main.__file__:
+        if 'salt-proxy' in main.__file__:
             is_proxy = True
     except AttributeError:
         pass
@@ -1618,6 +1649,29 @@ def is_smartos_globalzone():
             return True
 
         return False
+
+
+@real_memoize
+def is_smartos_zone():
+    '''
+    Function to return if host is SmartOS (Illumos) and not the gz
+    '''
+    if not is_smartos():
+        return False
+    else:
+        cmd = ['zonename']
+        try:
+            zonename = subprocess.Popen(
+                cmd, shell=False,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError:
+            return False
+        if zonename.returncode:
+            return False
+        if zonename.stdout.read().strip() == 'global':
+            return False
+
+        return True
 
 
 @real_memoize
@@ -2259,9 +2313,21 @@ def compare_versions(ver1='', oper='==', ver2='', cmp_func=None):
     if cmp_result is None:
         return False
 
+    # Check if integer/long
+    if not isinstance(cmp_result, numbers.Integral):
+        log.error('The version comparison function did not return an '
+                  'integer/long.')
+        return False
+
     if oper == '!=':
         return cmp_result not in cmp_map['==']
     else:
+        # Gracefully handle cmp_result not in (-1, 0, 1).
+        if cmp_result < -1:
+            cmp_result = -1
+        elif cmp_result > 1:
+            cmp_result = 1
+
         return cmp_result in cmp_map[oper]
 
 
@@ -2780,3 +2846,45 @@ def is_list(value):
     Check if a variable is a list.
     '''
     return isinstance(value, list)
+
+
+def invalid_kwargs(invalid_kwargs, raise_exc=True):
+    '''
+    Raise a SaltInvocationError if invalid_kwargs is non-empty
+    '''
+    if invalid_kwargs:
+        if isinstance(invalid_kwargs, dict):
+            new_invalid = [
+                '{0}={1}'.format(x, y)
+                for x, y in six.iteritems(invalid_kwargs)
+            ]
+            invalid_kwargs = new_invalid
+    msg = (
+        'The following keyword arguments are not valid: {0}'
+        .format(', '.join(invalid_kwargs))
+    )
+    if raise_exc:
+        raise SaltInvocationError(msg)
+    else:
+        return msg
+
+
+def itersplit(orig, sep=None):
+    '''
+    Generator function for iterating through large strings, particularly useful
+    as a replacement for str.splitlines() if the string is expected to contain
+    a lot of lines.
+
+    See http://stackoverflow.com/a/3865367
+    '''
+    exp = re.compile(r'\s+' if sep is None else re.escape(sep))
+    pos = 0
+    while True:
+        match = exp.search(orig, pos)
+        if not match:
+            if pos < len(orig) or sep is not None:
+                yield orig[pos:]
+            break
+        if pos < match.start() or sep is not None:
+            yield orig[pos:match.start()]
+        pos = match.end()

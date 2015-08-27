@@ -104,9 +104,9 @@ def _wait(jid):
 
 def running(concurrent=False):
     '''
-    Return a dict of state return data if a state function is already running.
-    This function is used to prevent multiple state calls from being run at
-    the same time.
+    Return a list of strings that contain state return data if a state function is
+    already running. This function is used to prevent multiple state calls from being
+    run at the same time.
 
     CLI Example:
 
@@ -244,13 +244,25 @@ def template(tem, queue=False, **kwargs):
 
         salt '*' state.template '<Path to template on the minion>'
     '''
+    if 'env' in kwargs:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        saltenv = kwargs['env']
+    elif 'saltenv' in kwargs:
+        saltenv = kwargs['saltenv']
+    else:
+        saltenv = ''
+
     conflict = _check_queue(queue, kwargs)
     if conflict is not None:
         return conflict
     st_ = salt.state.HighState(__opts__)
     if not tem.endswith('.sls'):
         tem = '{sls}.sls'.format(sls=tem)
-    high_state, errors = st_.render_state(tem, None, '', None, local=True)
+    high_state, errors = st_.render_state(tem, saltenv, '', None, local=True)
     if errors:
         __context__['retcode'] = 1
         return errors
@@ -1028,10 +1040,20 @@ def show_top(queue=False, **kwargs):
 
         salt '*' state.show_top
     '''
+    opts = copy.deepcopy(__opts__)
+    if 'env' in kwargs:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        opts['environment'] = kwargs['env']
+    elif 'saltenv' in kwargs:
+        opts['environment'] = kwargs['saltenv']
     conflict = _check_queue(queue, kwargs)
     if conflict is not None:
         return conflict
-    st_ = salt.state.HighState(__opts__)
+    st_ = salt.state.HighState(opts)
     errors = []
     top_ = st_.get_top()
     errors += st_.verify_tops(top_)

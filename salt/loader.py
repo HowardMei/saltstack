@@ -17,13 +17,13 @@ import logging
 import inspect
 import tempfile
 from collections import MutableMapping
+from zipimport import zipimporter
 
 # Import salt libs
 from salt.exceptions import LoaderError
 from salt.template import check_render_pipe_str
 from salt.utils.decorators import Depends
 import salt.utils.lazy
-import salt.utils.odict
 import salt.utils.event
 import salt.utils.odict
 
@@ -134,7 +134,8 @@ def minion_mods(
         include_errors=False,
         initial_load=False,
         loaded_base_name=None,
-        notify=False):
+        notify=False,
+        static_modules=None):
     '''
     Load execution modules
 
@@ -182,7 +183,8 @@ def minion_mods(
                      tag='module',
                      pack={'__context__': context, '__utils__': utils},
                      whitelist=whitelist,
-                     loaded_base_name=loaded_base_name)
+                     loaded_base_name=loaded_base_name,
+                     static_modules=static_modules)
 
     # Load any provider overrides from the configuration file providers option
     #  Note: Providers can be pkg, service, user or group - not to be confused
@@ -248,7 +250,7 @@ def engines(opts, functions, runners):
                       pack=pack)
 
 
-def proxy(opts, functions, whitelist=None):
+def proxy(opts, functions, whitelist=None, loaded_base_name=None):
     '''
     Returns the proxy module for this salt-proxy-minion
     '''
@@ -256,7 +258,8 @@ def proxy(opts, functions, whitelist=None):
                       opts,
                       tag='proxy',
                       whitelist=whitelist,
-                      pack={'__proxy__': functions})
+                      pack={'__proxy__': functions},
+                      loaded_base_name=loaded_base_name)
 
 
 def returners(opts, functions, whitelist=None, context=None):
@@ -448,6 +451,10 @@ def log_handlers(opts):
 
     :param dict opts: The Salt options dictionary
     '''
+    pack = {
+        '__grains__': grains(opts),
+        '__salt__': minion_mods(opts)
+    }
     ret = LazyLoader(_module_dirs(opts,
                                   'log_handlers',
                                   'log_handlers',
@@ -455,6 +462,7 @@ def log_handlers(opts):
                                   base_path=os.path.join(SALT_BASE_PATH, 'log')),
                      opts,
                      tag='log_handlers',
+                     pack=pack
                      )
     return FilterDictWrapper(ret, '.setup_handlers')
 
@@ -701,6 +709,42 @@ def sdb(opts, functions=None, whitelist=None):
                      )
 
 
+def pkgdb(opts):
+    '''
+    Return modules for SPM's package database
+
+    .. versionadded:: 2015.8.0
+    '''
+    return LazyLoader(
+        _module_dirs(
+            opts,
+            'pkgdb',
+            'pkgdb',
+            base_path=os.path.join(SALT_BASE_PATH, 'spm')
+        ),
+        opts,
+        tag='pkgdb'
+    )
+
+
+def pkgfiles(opts):
+    '''
+    Return modules for SPM's file handling
+
+    .. versionadded:: 2015.8.0
+    '''
+    return LazyLoader(
+        _module_dirs(
+            opts,
+            'pkgfiles',
+            'pkgfiles',
+            base_path=os.path.join(SALT_BASE_PATH, 'spm')
+        ),
+        opts,
+        tag='pkgfiles'
+    )
+
+
 def clouds(opts):
     '''
     Return the cloud functions
@@ -793,6 +837,9 @@ class LazyLoader(salt.utils.lazy.LazyDict):
         - move modules_max_memory into here
         - singletons (per tag)
     '''
+
+    mod_dict_class = salt.utils.odict.OrderedDict
+
     def __init__(self,
                  module_dirs,
                  opts=None,
@@ -802,7 +849,9 @@ class LazyLoader(salt.utils.lazy.LazyDict):
                  pack=None,
                  whitelist=None,
                  virtual_enable=True,
+                 static_modules=None
                  ):  # pylint: disable=W0231
+
         self.opts = self.__prep_mod_opts(opts)
 
         self.module_dirs = module_dirs
@@ -824,6 +873,7 @@ class LazyLoader(salt.utils.lazy.LazyDict):
         self.missing_modules = {}  # mapping of name -> error
         self.loaded_modules = {}  # mapping of module_name -> dict_of_functions
         self.loaded_files = set()  # TODO: just remove them from file_mapping?
+        self.static_modules = static_modules if static_modules else []
 
         self.disabled = set(self.opts.get('disable_{0}s'.format(self.tag), []))
 
@@ -843,7 +893,7 @@ class LazyLoader(salt.utils.lazy.LazyDict):
         '''
         # if we have an attribute named that, lets return it.
         try:
-            return object.__getattr__(self, mod_name)
+            return object.__getattr__(self, mod_name)  # pylint: disable=no-member
         except AttributeError:
             pass
 
@@ -900,6 +950,9 @@ class LazyLoader(salt.utils.lazy.LazyDict):
             except ImportError:
                 log.info('Cython is enabled in the options but not present '
                     'in the system path. Skipping Cython modules.')
+        # Allow for zipimport of modules
+        if self.opts.get('enable_zip_modules', True) is True:
+            self.suffix_map['.zip'] = tuple()
         # allow for module dirs
         self.suffix_map[''] = ('', '', imp.PKG_DIRECTORY)
 
@@ -953,6 +1006,9 @@ class LazyLoader(salt.utils.lazy.LazyDict):
                             self.file_mapping[f_noext] = (fpath, ext)
                 except OSError:
                     continue
+        for smod in self.static_modules:
+            f_noext = smod.split('.')[-1]
+            self.file_mapping[f_noext] = (smod, '.o')
 
     def clear(self):
         '''
@@ -1027,6 +1083,17 @@ class LazyLoader(salt.utils.lazy.LazyDict):
             sys.path.append(os.path.dirname(fpath))
             if suffix == '.pyx':
                 mod = self.pyximport.load_module(name, fpath, tempfile.gettempdir())
+            elif suffix == '.o':
+                top_mod = __import__(fpath, globals(), locals(), [])
+                comps = fpath.split('.')
+                if len(comps) < 2:
+                    mod = top_mod
+                else:
+                    mod = top_mod
+                    for subname in comps[1:]:
+                        mod = getattr(mod, subname)
+            elif suffix == '.zip':
+                mod = zipimporter(fpath).load_module(name)
             else:
                 desc = self.suffix_map[suffix]
                 # if it is a directory, we dont open a file
@@ -1042,7 +1109,7 @@ class LazyLoader(salt.utils.lazy.LazyDict):
                     if not self.initial_load:
                         self._reload_submodules(mod)
                 else:
-                    with open(fpath, desc[1]) as fn_:
+                    with salt.utils.fopen(fpath, desc[1]) as fn_:
                         mod = imp.load_module(
                             '{0}.{1}.{2}.{3}'.format(
                                 self.loaded_base_name,
@@ -1138,14 +1205,17 @@ class LazyLoader(salt.utils.lazy.LazyDict):
         # If this is a proxy minion then MOST modules cannot work. Therefore, require that
         # any module that does work with salt-proxy-minion define __proxyenabled__ as a list
         # containing the names of the proxy types that the module supports.
-        if not hasattr(mod, 'render') and 'proxy' in self.opts:
-            if not hasattr(mod, '__proxyenabled__') or \
-                    self.opts['proxy']['proxytype'] in mod.__proxyenabled__ or \
-                    '*' in mod.__proxyenabled__:
-                err_string = 'not a proxy_minion enabled module'
-                self.missing_modules[module_name] = err_string
-                self.missing_modules[name] = err_string
-                return False
+        #
+        # Render modules and state modules are OK though
+        if 'proxymodule' in self.opts:
+            if self.tag not in ['render', 'states', 'utils']:
+                if not hasattr(mod, '__proxyenabled__') or \
+                        (self.opts['proxymodule'].loaded_base_name not in mod.__proxyenabled__ and
+                            '*' not in mod.__proxyenabled__):
+                    err_string = 'not a proxy_minion enabled module'
+                    self.missing_modules[module_name] = err_string
+                    self.missing_modules[name] = err_string
+                    return False
 
         if getattr(mod, '__load__', False) is not False:
             log.info(
@@ -1154,7 +1224,7 @@ class LazyLoader(salt.utils.lazy.LazyDict):
                     module_name
                 )
             )
-        mod_dict = salt.utils.odict.OrderedDict()
+        mod_dict = self.mod_dict_class()
         for attr in getattr(mod, '__load__', dir(mod)):
             if attr.startswith('_'):
                 # private functions are skipped
@@ -1180,9 +1250,9 @@ class LazyLoader(salt.utils.lazy.LazyDict):
         # enforce depends
         try:
             Depends.enforce_dependencies(self._dict, self.tag)
-        except RuntimeError as e:
+        except RuntimeError as exc:
             log.info('Depends.enforce_dependencies() failed '
-                     'for reasons: {0}'.format(e))
+                     'for reasons: {0}'.format(exc))
 
         self.loaded_modules[module_name] = mod_dict
         return True

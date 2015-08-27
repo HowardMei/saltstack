@@ -106,7 +106,7 @@ def __virtual__():
 
         if not os.path.exists(details['private_key']):
             raise SaltCloudException(
-                'The AWS key file {0!r} used in the {1!r} provider '
+                'The AWS key file \'{0}\' used in the \'{1}\' provider '
                 'configuration does not exist\n'.format(
                     details['private_key'],
                     provider
@@ -118,7 +118,7 @@ def __virtual__():
         )
         if keymode not in ('0400', '0600'):
             raise SaltCloudException(
-                'The AWS key file {0!r} used in the {1!r} provider '
+                'The AWS key file \'{0}\' used in the \'{1}\' provider '
                 'configuration needs to be set to mode 0400 or 0600\n'.format(
                     details['private_key'],
                     provider
@@ -312,9 +312,9 @@ def create(vm_):
     '''
     try:
         # Check for required profile parameters before sending any API calls.
-        if config.is_profile_configured(__opts__,
-                                        __active_provider_name__ or 'aws',
-                                        vm_['profile']) is False:
+        if vm_['profile'] and config.is_profile_configured(__opts__,
+                                                           __active_provider_name__ or 'aws',
+                                                           vm_['profile']) is False:
             return False
     except AttributeError:
         pass
@@ -324,7 +324,7 @@ def create(vm_):
     )
     if key_filename is not None and not os.path.isfile(key_filename):
         raise SaltCloudConfigError(
-            'The defined key_filename {0!r} does not exist'.format(
+            'The defined key_filename \'{0}\' does not exist'.format(
                 key_filename
             )
         )
@@ -556,9 +556,9 @@ def create(vm_):
 
     ret.update(data.__dict__)
 
-    log.info('Created Cloud VM {0[name]!r}'.format(vm_))
+    log.info('Created Cloud VM \'{0[name]}\''.format(vm_))
     log.debug(
-        '{0[name]!r} VM creation details:\n{1}'.format(
+        '\'{0[name]}\' VM creation details:\n{1}'.format(
             vm_, pprint.pformat(data.__dict__)
         )
     )
@@ -783,9 +783,14 @@ def destroy(name):
     ret = {}
 
     newname = name
-    if config.get_cloud_config_value('rename_on_destroy',
-                               get_configured_provider(),
-                               __opts__, search_global=False) is True:
+
+    # Default behavior is to rename AWS VMs when destroyed
+    # via salt-cloud, unless explicitly set to False.
+    rename_on_destroy = config.get_cloud_config_value('rename_on_destroy',
+                                                      get_configured_provider(),
+                                                      __opts__,
+                                                      search_global=False)
+    if rename_on_destroy is not False:
         newname = '{0}-DEL{1}'.format(name, uuid.uuid4().hex)
         rename(name, kwargs={'newname': newname}, call='action')
         log.info(

@@ -268,7 +268,7 @@ VALID_OPTS = {
     'log_file': str,
 
     # The level of verbosity at which to log
-    'log_level': bool,
+    'log_level': str,
 
     # The log level to log to a given file
     'log_level_logfile': bool,
@@ -296,6 +296,9 @@ VALID_OPTS = {
 
     # Tell the loader to attempt to import *.pyx cython files if cython is available
     'cython_enable': bool,
+
+    # Tell the loader to attempt to import *.zip archives
+    'enable_zip_modules': bool,
 
     # Tell the client to show minions that have timed out
     'show_timeout': bool,
@@ -380,9 +383,6 @@ VALID_OPTS = {
 
     # Events matching a tag in this list should never be sent to an event returner.
     'event_return_blacklist': list,
-
-    # The source location for the winrepo sls files
-    'win_repo_source_dir': str,
 
     # This pidfile to write out to when a deamon starts
     'pidfile': str,
@@ -484,9 +484,21 @@ VALID_OPTS = {
     # Whether or not a copy of the master opts dict should be rendered into minion pillars
     'pillar_opts': bool,
 
-
     'pillar_safe_render_error': bool,
+
+    # When creating a pillar, there are several stratigies to choose from when
+    # encountering duplicate values
     'pillar_source_merging_strategy': str,
+
+    # The ordering for environment merging
+    'env_order': list,
+
+    'default_top': str,
+
+    # Can be 'merge', 'same', 'preferred'
+    'top_file_merging_strategy': str,
+    'top_file_base': str,
+
     'ping_on_rotate': bool,
     'peer': dict,
     'preserve_minion_cache': bool,
@@ -570,9 +582,21 @@ VALID_OPTS = {
     # The logfile location for salt-key
     'key_logfile': str,
 
-    'win_repo': str,
-    'win_repo_mastercachefile': str,
-    'win_gitrepos': list,
+    # The source location for the winrepo sls files
+    # (used by win_pkg.py, minion only)
+    'winrepo_source_dir': str,
+
+    'winrepo_dir': str,
+    'winrepo_cachefile': str,
+    'winrepo_remotes': list,
+    'winrepo_branch': str,
+    'winrepo_ssl_verify': bool,
+    'winrepo_user': str,
+    'winrepo_password': str,
+    'winrepo_insecure_auth': bool,
+    'winrepo_privkey': str,
+    'winrepo_pubkey': str,
+    'winrepo_passphrase': str,
 
     # Set a hard limit for the amount of memory modules can consume on a minion.
     'modules_max_memory': int,
@@ -707,6 +731,13 @@ VALID_OPTS = {
 
     # If set, all minion exec module actions will be rerouted through sudo as this user
     'sudo_user': str,
+
+    # HTTP request timeout in seconds. Applied for tornado http fetch functions like cp.get_url should be greater than
+    # overall download time.
+    'http_request_timeout': float,
+
+    # HTTP request max file content size.
+    'http_max_body': int,
 }
 
 # default configurations
@@ -750,6 +781,9 @@ DEFAULT_MINION_OPTS = {
     'file_roots': {
         'base': [salt.syspaths.BASE_FILE_ROOTS_DIR],
     },
+    'default_top': 'base',
+    'env_order': [],
+    'top_file_merging_strategy': 'merge',
     'fileserver_limit_traversal': False,
     'file_recv': False,
     'file_recv_max_size': 100,
@@ -809,7 +843,7 @@ DEFAULT_MINION_OPTS = {
     'tcp_pub_port': 4510,
     'tcp_pull_port': 4511,
     'log_file': os.path.join(salt.syspaths.LOGS_DIR, 'minion'),
-    'log_level': None,
+    'log_level': 'info',
     'log_level_logfile': None,
     'log_datefmt': _DFLT_LOG_DATEFMT,
     'log_datefmt_logfile': _DFLT_LOG_DATEFMT_LOGFILE,
@@ -820,6 +854,7 @@ DEFAULT_MINION_OPTS = {
     'test': False,
     'ext_job_cache': '',
     'cython_enable': False,
+    'enable_zip_modules': False,
     'state_verbose': True,
     'state_output': 'full',
     'state_output_diff': False,
@@ -843,7 +878,10 @@ DEFAULT_MINION_OPTS = {
     'syndic_log_file': os.path.join(salt.syspaths.LOGS_DIR, 'syndic'),
     'syndic_pidfile': os.path.join(salt.syspaths.PIDFILE_DIR, 'salt-syndic.pid'),
     'random_reauth_delay': 10,
-    'win_repo_source_dir': 'salt://win/repo/',
+    'winrepo_source_dir': 'salt://win/repo/',
+    'winrepo_dir': os.path.join(salt.syspaths.BASE_FILE_ROOTS_DIR, 'win', 'repo'),
+    'winrepo_cachefile': 'winrepo.p',
+    'winrepo_remotes': ['https://github.com/saltstack/salt-winrepo.git'],
     'pidfile': os.path.join(salt.syspaths.PIDFILE_DIR, 'salt-minion.pid'),
     'range_server': 'range:80',
     'tcp_keepalive': True,
@@ -884,6 +922,8 @@ DEFAULT_MINION_OPTS = {
     'cache_sreqs': True,
     'cmd_safe': True,
     'sudo_user': '',
+    'http_request_timeout': 1 * 60 * 60.0,  # 1 hour
+    'http_max_body': 100 * 1024 * 1024 * 1024,  # 100GB
 }
 
 DEFAULT_MASTER_OPTS = {
@@ -909,6 +949,9 @@ DEFAULT_MASTER_OPTS = {
     'pillar_roots': {
         'base': [salt.syspaths.BASE_PILLAR_ROOTS_DIR],
     },
+    'default_top': 'base',
+    'env_order': [],
+    'top_file_merging_strategy': 'merge',
     'file_client': 'local',
     'git_pillar_base': 'master',
     'git_pillar_branch': 'master',
@@ -1006,7 +1049,7 @@ DEFAULT_MASTER_OPTS = {
     'tcp_master_publish_pull': 4514,
     'tcp_master_workers': 4515,
     'log_file': os.path.join(salt.syspaths.LOGS_DIR, 'master'),
-    'log_level': None,
+    'log_level': 'info',
     'log_level_logfile': None,
     'log_datefmt': _DFLT_LOG_DATEFMT,
     'log_datefmt_logfile': _DFLT_LOG_DATEFMT_LOGFILE,
@@ -1042,10 +1085,17 @@ DEFAULT_MASTER_OPTS = {
     'verify_env': True,
     'permissive_pki_access': False,
     'default_include': 'master.d/*.conf',
-    'win_repo': os.path.join(salt.syspaths.BASE_FILE_ROOTS_DIR, 'win', 'repo'),
-    'win_repo_mastercachefile': os.path.join(salt.syspaths.BASE_FILE_ROOTS_DIR,
-                                             'win', 'repo', 'winrepo.p'),
-    'win_gitrepos': ['https://github.com/saltstack/salt-winrepo.git'],
+    'winrepo_dir': os.path.join(salt.syspaths.BASE_FILE_ROOTS_DIR, 'win', 'repo'),
+    'winrepo_cachefile': 'winrepo.p',
+    'winrepo_remotes': ['https://github.com/saltstack/salt-winrepo.git'],
+    'winrepo_branch': 'master',
+    'winrepo_ssl_verify': False,
+    'winrepo_user': '',
+    'winrepo_password': '',
+    'winrepo_insecure_auth': False,
+    'winrepo_privkey': '',
+    'winrepo_pubkey': '',
+    'winrepo_passphrase': '',
     'syndic_wait': 5,
     'jinja_lstrip_blocks': False,
     'jinja_trim_blocks': False,
@@ -1096,6 +1146,18 @@ DEFAULT_MASTER_OPTS = {
     'rotate_aes_key': True,
     'cache_sreqs': True,
     'dummy_pub': False,
+    'http_request_timeout': 1 * 60 * 60.0,  # 1 hour
+    'http_max_body': 100 * 1024 * 1024 * 1024,  # 100GB
+}
+
+
+# ----- Salt Proxy Minion Configuration Defaults ----------------------------------->
+# Note that proxies use the same config path as regular minions.  DEFAULT_MINION_OPTS
+# is loaded first, then if we are setting up a proxy, the config is overwritten with
+# these settings.
+DEFAULT_PROXY_MINION_OPTS = {
+    'conf_file': os.path.join(salt.syspaths.CONFIG_DIR, 'proxy'),
+    'log_file': os.path.join(salt.syspaths.LOGS_DIR, 'proxy'),
 }
 
 # ----- Salt Cloud Configuration Defaults ----------------------------------->
@@ -1114,7 +1176,7 @@ CLOUD_CONFIG_DEFAULTS = {
     'deploy_scripts_search_path': 'cloud.deploy.d',
     # Logging defaults
     'log_file': os.path.join(salt.syspaths.LOGS_DIR, 'cloud'),
-    'log_level': None,
+    'log_level': 'info',
     'log_level_logfile': None,
     'log_datefmt': _DFLT_LOG_DATEFMT,
     'log_datefmt_logfile': _DFLT_LOG_DATEFMT_LOGFILE,
@@ -1177,9 +1239,12 @@ def _expand_glob_path(file_roots):
     '''
     unglobbed_path = []
     for path in file_roots:
-        if glob.has_magic(path):
-            unglobbed_path.extend(glob.glob(path))
-        else:
+        try:
+            if glob.has_magic(path):
+                unglobbed_path.extend(glob.glob(path))
+            else:
+                unglobbed_path.append(path)
+        except Exception:
             unglobbed_path.append(path)
     return unglobbed_path
 
@@ -1442,6 +1507,9 @@ def minion_config(path,
     '''
     if defaults is None:
         defaults = DEFAULT_MINION_OPTS
+
+    if path is not None and path.endswith('proxy'):
+        defaults.update(DEFAULT_PROXY_MINION_OPTS)
 
     if not os.environ.get(env_var, None):
         # No valid setting was given using the configuration variable.
@@ -2445,12 +2513,20 @@ def is_profile_configured(opts, provider, profile_name):
     .. versionadded:: 2015.8.0
     '''
     # Standard dict keys required by all drivers.
-    required_keys = ['image', 'provider']
+    required_keys = ['provider']
     alias, driver = provider.split(':')
+
+    # Most drivers need an image to be specified, but some do not.
+    non_image_drivers = ['vmware']
 
     # Most drivers need a size, but some do not.
     non_size_drivers = ['opennebula', 'parallels', 'scaleway', 'softlayer',
                         'softlayer_hw', 'vmware', 'vsphere']
+
+    if driver not in non_image_drivers:
+        required_keys.append('image')
+    elif driver == 'vmware':
+        required_keys.append('clonefrom')
 
     if driver not in non_size_drivers:
         required_keys.append('size')

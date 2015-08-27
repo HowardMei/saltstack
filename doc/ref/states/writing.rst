@@ -93,9 +93,30 @@ A State Module must return a dict containing the following keys/values:
   containing the old/new values. For example, the pkg state's **changes** dict
   has one key for each package changed, with the "old" and "new" keys in its
   sub-dict containing the old and new versions of the package.
-- **result:** A boolean value. *True* if the action was successful, otherwise
-  *False*.
+- **result:** A tristate value.  ``True`` if the action was successful,
+  ``False`` if it was not, or ``None`` if the state was run in test mode,
+  ``test=True``, and changes would have been made if the state was not run in
+  test mode.
+
+  +--------------------+-----------+-----------+
+  |                    | live mode | test mode |
+  +====================+===========+===========+
+  | no changes         | ``True``  | ``True``  |
+  +--------------------+-----------+-----------+
+  | successful changes | ``True``  | ``None``  |
+  +--------------------+-----------+-----------+
+  | failed changes     | ``False`` | ``None``  |
+  +--------------------+-----------+-----------+
+
+  .. note::
+
+      Test mode does not predict if the changes will be successful or not.
+
 - **comment:** A string containing a summary of the result.
+
+The return data can also, include the **pchanges** key, this statnds for
+`predictive changes`. The **pchanges** key informs the State system what
+changes are predicted to occur.
 
 Test State
 ==========
@@ -234,7 +255,13 @@ Example state module
         bar : True
             An argument with a default value
         '''
-        ret = {'name': name, 'changes': {}, 'result': False, 'comment': ''}
+        ret = {
+            'name': name,
+            'changes': {},
+            'result': False,
+            'comment': '',
+            'pchanges': {},
+            }
 
         # Start with basic error-checking. Do all the passed parameters make sense
         # and agree with each-other?
@@ -254,7 +281,7 @@ Example state module
         # in ``test=true`` mode.
         if __opts__['test'] == True:
             ret['comment'] = 'The state of "{0}" will be changed.'.format(name)
-            ret['changes'] = {
+            ret['pchanges'] = {
                 'old': current_state,
                 'new': 'Description, diff, whatever of the new state',
             }

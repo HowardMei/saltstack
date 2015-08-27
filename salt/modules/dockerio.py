@@ -252,7 +252,7 @@ def _valid(m, id_=NOTSET, comment=VALID_RESPONSE, out=None):
     return _set_status(m, status=True, id_=id_, comment=comment, out=out)
 
 
-def _get_client(version=None, timeout=None):
+def _get_client(timeout=None):
     '''
     Get a connection to a docker API (socket or URL)
     based on config.get mechanism (pillar -> grains)
@@ -279,14 +279,16 @@ def _get_client(version=None, timeout=None):
         # only if defined by user.
         kwargs['timeout'] = timeout
 
+    if 'version' not in kwargs:
+        # Let docker-py auto detect docker version incase
+        # it's not defined by user.
+        kwargs['version'] = 'auto'
+
     if 'base_url' not in kwargs and 'DOCKER_HOST' in os.environ:
         # Check if the DOCKER_HOST environment variable has been set
         kwargs['base_url'] = os.environ.get('DOCKER_HOST')
 
     client = docker.Client(**kwargs)
-    if not version:
-        # set version that match docker daemon
-        client._version = client.version()['ApiVersion']
 
     # try to authenticate the client using credentials
     # found in pillars
@@ -658,25 +660,47 @@ def create_container(image,
                 volumes.remove(volume)
 
     try:
-        container_info = client.create_container(
-            image=image,
-            command=command,
-            hostname=hostname,
-            user=user,
-            detach=detach,
-            stdin_open=stdin_open,
-            tty=tty,
-            mem_limit=mem_limit,
-            ports=ports,
-            environment=environment,
-            dns=dns,
-            volumes=volumes,
-            volumes_from=volumes_from,
-            name=name,
-            cpu_shares=cpu_shares,
-            cpuset=cpuset,
-            host_config=docker.utils.create_host_config(binds=binds)
-        )
+        if salt.utils.version_cmp(client.version()['ApiVersion'], '1.18') == 1:
+            container_info = client.create_container(
+                image=image,
+                command=command,
+                hostname=hostname,
+                user=user,
+                detach=detach,
+                stdin_open=stdin_open,
+                tty=tty,
+                ports=ports,
+                environment=environment,
+                dns=dns,
+                volumes=volumes,
+                volumes_from=volumes_from,
+                name=name,
+                cpu_shares=cpu_shares,
+                cpuset=cpuset,
+                host_config=docker.utils.create_host_config(binds=binds,
+                                                            mem_limit=mem_limit)
+            )
+        else:
+            container_info = client.create_container(
+                image=image,
+                command=command,
+                hostname=hostname,
+                user=user,
+                detach=detach,
+                stdin_open=stdin_open,
+                tty=tty,
+                mem_limit=mem_limit,
+                ports=ports,
+                environment=environment,
+                dns=dns,
+                volumes=volumes,
+                volumes_from=volumes_from,
+                name=name,
+                cpu_shares=cpu_shares,
+                cpuset=cpuset,
+                host_config=docker.utils.create_host_config(binds=binds)
+            )
+
         log.trace("docker.client.create_container returned: " + str(container_info))
         container = container_info['Id']
         callback = _valid
