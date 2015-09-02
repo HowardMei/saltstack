@@ -534,7 +534,7 @@ class SMinion(MinionBase):
         # TODO: remove
         self.function_errors = {}  # Keep the funcs clean
         self.returners = salt.loader.returners(self.opts, self.functions)
-        self.states = salt.loader.states(self.opts, self.functions)
+        self.states = salt.loader.states(self.opts, self.functions, self.utils)
         self.rend = salt.loader.render(self.opts, self.functions)
         self.matcher = Matcher(self.opts, self.functions)
         self.functions['sys.reload_modules'] = self.gen_modules
@@ -578,7 +578,9 @@ class MasterMinion(object):
         if self.mk_returners:
             self.returners = salt.loader.returners(self.opts, self.functions)
         if self.mk_states:
-            self.states = salt.loader.states(self.opts, self.functions)
+            self.states = salt.loader.states(self.opts,
+                                             self.functions,
+                                             self.utils)
         if self.mk_rend:
             self.rend = salt.loader.render(self.opts, self.functions)
         if self.mk_matcher:
@@ -1023,7 +1025,7 @@ class Minion(MinionBase):
                 )
                 ret['success'] = True
             except CommandNotFoundError as exc:
-                msg = 'Command required for {0!r} not found'.format(
+                msg = 'Command required for \'{0}\' not found'.format(
                     function_name
                 )
                 log.debug(msg, exc_info=True)
@@ -1031,7 +1033,7 @@ class Minion(MinionBase):
                 ret['out'] = 'nested'
             except CommandExecutionError as exc:
                 log.error(
-                    'A command in {0!r} had a problem: {1}'.format(
+                    'A command in \'{0}\' had a problem: {1}'.format(
                         function_name,
                         exc
                     ),
@@ -1041,13 +1043,13 @@ class Minion(MinionBase):
                 ret['out'] = 'nested'
             except SaltInvocationError as exc:
                 log.error(
-                    'Problem executing {0!r}: {1}'.format(
+                    'Problem executing \'{0}\': {1}'.format(
                         function_name,
                         exc
                     ),
                     exc_info_on_loglevel=logging.DEBUG
                 )
-                ret['return'] = 'ERROR executing {0!r}: {1}'.format(
+                ret['return'] = 'ERROR executing \'{0}\': {1}'.format(
                     function_name, exc
                 )
                 ret['out'] = 'nested'
@@ -1066,7 +1068,9 @@ class Minion(MinionBase):
             ret['return'] = minion_instance.functions.missing_fun_string(function_name)
             mod_name = function_name.split('.')[0]
             if mod_name in minion_instance.function_errors:
-                ret['return'] += ' Possible reasons: {0!r}'.format(minion_instance.function_errors[mod_name])
+                ret['return'] += ' Possible reasons: \'{0}\''.format(
+                    minion_instance.function_errors[mod_name]
+                )
             ret['success'] = False
             ret['retcode'] = 254
             ret['out'] = 'nested'
@@ -1454,7 +1458,7 @@ class Minion(MinionBase):
         '''
         Handle an event from the epull_sock (all local minion events)
         '''
-        log.debug('Handling event {0!r}'.format(package))
+        log.debug('Handling event \'{0}\''.format(package))
         if package.startswith('module_refresh'):
             tag, data = salt.utils.event.MinionEvent.unpack(package)
             self.module_refresh(notify=data.get('notify', False))
@@ -1588,7 +1592,7 @@ class Minion(MinionBase):
             io_loop=self.io_loop,
         )
 
-        log.debug('Minion {0!r} trying to tune in'.format(self.opts['id']))
+        log.debug('Minion \'{0}\' trying to tune in'.format(self.opts['id']))
 
         if start:
             self.sync_connect_master()
@@ -1792,7 +1796,7 @@ class Syndic(Minion):
         Lock onto the publisher. This is the main event loop for the syndic
         '''
         signal.signal(signal.SIGTERM, self.clean_die)
-        log.debug('Syndic {0!r} trying to tune in'.format(self.opts['id']))
+        log.debug('Syndic \'{0}\' trying to tune in'.format(self.opts['id']))
 
         if start:
             self.sync_connect_master()
@@ -2061,7 +2065,7 @@ class MultiSyndic(MinionBase):
         self.local = salt.client.get_local_client(self.opts['_minion_conf_file'])
         self.local.event.subscribe('')
 
-        log.debug('MultiSyndic {0!r} trying to tune in'.format(self.opts['id']))
+        log.debug('MultiSyndic \'{0}\' trying to tune in'.format(self.opts['id']))
 
         # register the event sub to the poller
         self._reset_event_aggregation()
