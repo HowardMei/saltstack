@@ -5,8 +5,8 @@ Management of Docker Containers
 .. versionadded:: 2015.8.0
 
 
-Why Make a Second Docker Module?
---------------------------------
+Why Make a Second Docker Execution Module?
+------------------------------------------
 
 We have received a lot of feedback on our Docker support. In the process of
 implementing recommended improvements, it became obvious that major changes
@@ -19,7 +19,7 @@ option. This will give users a couple release cycles to modify their scripts,
 SLS files, etc. to use the new functionality, rather than forcing users to
 change everything immediately.
 
-In the **Carbon** release of Salt (due early 2016), this execution module will
+In the **Carbon** release of Salt (due in 2016), this execution module will
 take the place of the default Docker execution module, and backwards-compatible
 naming will be maintained for a couple releases after that to allow users time
 to replace references to ``dockerng`` with ``docker``.
@@ -28,13 +28,13 @@ to replace references to ``dockerng`` with ``docker``.
 Installation Prerequisites
 --------------------------
 
-This execution module requires at least version 1.0.0 of both docker-py_ and
+This execution module requires at least version 1.4.0 of both docker-py_ and
 Docker_. docker-py can easily be installed using :py:func:`pip.install
 <salt.modules.pip.install>`:
 
 .. code-block:: bash
 
-    salt myminion pip.install docker-py
+    salt myminion pip.install docker-py>=1.4.0
 
 .. _docker-py: https://pypi.python.org/pypi/docker-py
 .. _Docker: https://www.docker.com/
@@ -102,6 +102,20 @@ The second way is to use separate pillar variables ending in
 Both methods can be combined; any registry configured under
 ``docker-registries`` or ``*-docker-registries`` will be detected.
 
+Configuration Options
+---------------------
+
+The following options can be set in the :ref:`minion config
+<configuration-salt-minion>`:
+
+- ``docker.url``: URL to the docker service (default: local socket).
+- ``docker.version``: API version to use (default: currently 1.4 API).
+- ``docker.exec_driver``: Execution driver to use, one of the following:
+    - nsenter
+    - lxc-attach
+    - docker-exec
+
+    See :ref:`Executing Commands Within a Running Container <docker-execution-driver>`.
 
 Functions
 ---------
@@ -220,6 +234,7 @@ import distutils.version  # pylint: disable=import-error,no-name-in-module,unuse
 import fnmatch
 import functools
 import gzip
+import inspect as inspect_module
 import json
 import logging
 import os
@@ -232,6 +247,7 @@ import time
 
 # Import Salt libs
 from salt.exceptions import CommandExecutionError, SaltInvocationError
+from salt.ext.six.moves import map  # pylint: disable=import-error,redefined-builtin
 from salt.utils.decorators \
     import identical_signature_wrapper as _mimic_signature
 import salt.utils
@@ -242,6 +258,7 @@ import salt.ext.six as six
 # pylint: disable=import-error
 try:
     import docker
+    import docker.utils
     HAS_DOCKER_PY = True
 except ImportError:
     HAS_DOCKER_PY = False
@@ -273,7 +290,7 @@ __func_alias__ = {
 
 # Minimum supported versions
 MIN_DOCKER = (1, 0, 0)
-MIN_DOCKER_PY = (1, 0, 0)
+MIN_DOCKER_PY = (1, 4, 0)
 
 VERSION_RE = r'([\d.]+)'
 
@@ -400,6 +417,9 @@ VALID_CREATE_OPTS = {
     'cpuset': {
         'path': 'Config:Cpuset',
     },
+    'labels': {
+      'path': 'Config:Labels',
+    },
 }
 
 VALID_RUNTIME_OPTS = {
@@ -474,6 +494,7 @@ def __virtual__():
             docker_py_versioninfo = _get_docker_py_versioninfo()
         except CommandExecutionError:
             docker_py_versioninfo = None
+
         # Don't let a failure to interpret the version keep this module from
         # loading. Log a warning (log happens in _get_docker_py_versioninfo()).
         if docker_py_versioninfo is None \
@@ -482,17 +503,22 @@ def __virtual__():
                 docker_versioninfo = version().get('VersionInfo')
             except CommandExecutionError:
                 docker_versioninfo = None
+
             if docker_versioninfo is None or docker_versioninfo >= MIN_DOCKER:
                 return __virtualname__
             else:
-                log.warning(
+                return (False,
                     'Insufficient Docker version for dockerng (required: '
                     '{0}, installed: {1})'.format(
-                        '.'.join(docker_versioninfo),
-                        '.'.join(MIN_DOCKER)
-                    )
-                )
-    return False
+                        '.'.join(map(str, MIN_DOCKER)),
+                        '.'.join(map(str, docker_versioninfo))))
+        else:
+            return (False,
+                'Insufficient docker-py version for dockerng (required: '
+                '{0}, installed: {1})'.format(
+                    '.'.join(map(str, MIN_DOCKER_PY)),
+                    '.'.join(map(str, docker_py_versioninfo))))
+    return (False, 'Docker module could not get imported')
 
 
 def _get_docker_py_versioninfo():
@@ -573,7 +599,7 @@ def _ensure_exists(wrapped):
 
 def _refresh_mine_cache(wrapped):
     '''
-    Decorator to trig a refresh of salt mine data.
+    Decorator to trigger a refresh of salt mine data.
     '''
     @functools.wraps(wrapped)
     def wrapper(*args, **kwargs):
@@ -642,7 +668,7 @@ def _get_client(timeout=None):
     Set those keys in your configuration tree somehow:
 
         - docker.url: URL to the docker service
-        - docker.version: API version to use
+        - docker.version: API version to use (default: "auto")
     '''
     if 'docker.client' not in __context__:
         client_kwargs = {}
@@ -1089,6 +1115,13 @@ def _validate_input(action,
                             for x in kwargs[key]]):
             raise SaltInvocationError(key + ' must be a list of strings')
 
+    def _valid_dictlist(key):  # pylint: disable=unused-variable
+        '''
+        Ensure the passed value is a list of dictionaries.
+        '''
+        if not salt.utils.is_dictlist(kwargs[key]):
+            raise SaltInvocationError(key + ' must be a list of dictionaries.')
+
     # Custom validation functions for container creation options
     def _valid_command():  # pylint: disable=unused-variable
         '''
@@ -1108,7 +1141,7 @@ def _validate_input(action,
             _valid_stringlist('command')
         except SaltInvocationError:
             raise SaltInvocationError(
-                'command must be a string or list of strings'
+                'command/cmd must be a string or list of strings'
             )
 
     def _valid_user():  # pylint: disable=unused-variable
@@ -1623,6 +1656,32 @@ def _validate_input(action,
                 'pid_mode can only be \'host\', if set'
             )
 
+    def _valid_labels():  # pylint: disable=unused-variable
+        '''
+        Must be a dict or a list of strings
+        '''
+        if kwargs.get('labels') is None:
+            return
+        try:
+            _valid_stringlist('labels')
+        except SaltInvocationError:
+            try:
+                _valid_dictlist('labels')
+            except SaltInvocationError:
+                try:
+                    _valid_dict('labels')
+                except SaltInvocationError:
+                    raise SaltInvocationError(
+                        'labels can only be a list of strings/dict'
+                        ' or a dict containing strings')
+                else:
+                    new_labels = {}
+                    for k, v in six.iteritems(kwargs['labels']):
+                        new_labels[str(k)] = str(v)
+                    kwargs['labels'] = new_labels
+            else:
+                kwargs['labels'] = salt.utils.repack_dictlist(kwargs['labels'])
+
     # And now, the actual logic to perform the validation
     if action == 'create':
         valid_opts = VALID_CREATE_OPTS
@@ -2119,7 +2178,10 @@ def list_containers(**kwargs):
     '''
     ret = set()
     for item in six.itervalues(ps_(all=kwargs.get('all', False))):
-        for c_name in [x.lstrip('/') for x in item.get('Names', [])]:
+        names = item.get('Names')
+        if not names:
+            continue
+        for c_name in [x.lstrip('/') for x in names or []]:
             ret.add(c_name)
     return sorted(ret)
 
@@ -2239,7 +2301,7 @@ def port(name, private_port=None):
     return dict((x, mappings[x]) for x in fnmatch.filter(mappings, pattern))
 
 
-def ps_(**kwargs):
+def ps_(filters=None, **kwargs):
     '''
     Returns information about the Docker containers on the Minion. Equivalent
     to running the ``docker ps`` Docker CLI command.
@@ -2254,6 +2316,13 @@ def ps_(**kwargs):
         If ``True``, a ``docker inspect`` will be run on each container
         returned.
 
+    filters: None
+        A dictionary of filters to be processed on the container list.
+        Available filters:
+
+          - exited (int): Only containers with specified exit code
+          - status (str): One of restarting, running, paused, exited
+          - label (str): format either "key" or "key=value"
 
     **RETURN DATA**
 
@@ -2267,32 +2336,31 @@ def ps_(**kwargs):
 
         salt myminion dockerng.ps
         salt myminion dockerng.ps all=True
+        salt myminion dockerng.ps filters="{'label': 'role=web'}"
     '''
-    if 'docker.ps' not in __context__:
-        response = _client_wrapper('containers', all=True)
-        key_map = {
-            'Created': 'Time_Created_Epoch',
-        }
-        for container in response:
-            c_id = container.pop('Id', None)
-            if c_id is None:
-                continue
-            for item in container:
-                c_state = 'running' \
-                    if container.get('Status', '').lower().startswith('up ') \
-                    else 'stopped'
-                bucket = __context__.setdefault('docker.ps', {}).setdefault(
-                    c_state, {})
-                c_key = key_map.get(item, item)
-                bucket.setdefault(c_id, {})[c_key] = container[item]
-            if 'Time_Created_Epoch' in bucket.get(c_id, {}):
-                bucket[c_id]['Time_Created_Local'] = \
-                    time.strftime(
-                        '%Y-%m-%d %H:%M:%S %Z',
-                        time.localtime(bucket[c_id]['Time_Created_Epoch'])
-                    )
+    response = _client_wrapper('containers', all=True, filters=filters)
+    key_map = {
+        'Created': 'Time_Created_Epoch',
+    }
+    context_data = {}
+    for container in response:
+        c_id = container.pop('Id', None)
+        if c_id is None:
+            continue
+        for item in container:
+            c_state = 'running' \
+                if container.get('Status', '').lower().startswith('up ') \
+                else 'stopped'
+            bucket = context_data.setdefault(c_state, {})
+            c_key = key_map.get(item, item)
+            bucket.setdefault(c_id, {})[c_key] = container[item]
+        if 'Time_Created_Epoch' in bucket.get(c_id, {}):
+            bucket[c_id]['Time_Created_Local'] = \
+                time.strftime(
+                    '%Y-%m-%d %H:%M:%S %Z',
+                    time.localtime(bucket[c_id]['Time_Created_Epoch'])
+                )
 
-    context_data = __context__.get('docker.ps', {})
     ret = copy.deepcopy(context_data.get('running', {}))
     if kwargs.get('all', False):
         ret.update(copy.deepcopy(context_data.get('stopped', {})))
@@ -2456,7 +2524,7 @@ def top(name):
 
 def version():
     '''
-    Returns a dictionary of Docker version information. Equivlent to running
+    Returns a dictionary of Docker version information. Equivalent to running
     the ``docker version`` Docker CLI command.
 
     CLI Example:
@@ -2498,10 +2566,13 @@ def create(image,
     image
         Image from which to create the container
 
-    command
+    command or cmd
         Command to run in the container
 
-        Example: ``command=bash``
+        Example: ``command=bash`` or ``cmd=bash``
+
+        .. versionchanged:: 2015.8.1
+            ``cmd`` is now also accepted
 
     hostname
         Hostname of the container. If not provided, and if a ``name`` has been
@@ -2616,6 +2687,12 @@ def create(image,
 
             This is only used if Salt needs to pull the requested image.
 
+    labels
+        Add Metadata to the container. Can be a list of strings/dictionaries
+        or a dictionary of strings (keys and values).
+
+        Example: ``labels=LABEL1,LABEL2``,
+        ``labels="{'LABEL1': 'value1', 'LABEL2': 'value2'}"``
 
     **RETURN DATA**
 
@@ -2634,6 +2711,14 @@ def create(image,
         # Create a CentOS 7 container that will stay running once started
         salt myminion dockerng.create centos:7 name=mycent7 interactive=True tty=True command=bash
     '''
+    if 'cmd' in kwargs:
+        if 'command' in kwargs:
+            raise SaltInvocationError(
+                'Only one of \'command\' and \'cmd\' can be used. Both '
+                'arguments are equivalent.'
+            )
+        kwargs['command'] = kwargs.pop('cmd')
+
     try:
         # Try to inspect the image, if it fails then we know we need to pull it
         # first.
@@ -2661,12 +2746,11 @@ def create(image,
     # Added to manage api change in 1.19.
     # mem_limit and memswap_limit must be provided in host_config object
     if salt.utils.version_cmp(version()['ApiVersion'], '1.18') == 1:
-        create_kwargs['host_config'] = docker.utils.create_host_config(mem_limit=create_kwargs.get('mem_limit'),
-                                                                       memswap_limit=create_kwargs.get('memswap_limit'))
-        if 'mem_limit' in create_kwargs:
-            del create_kwargs['mem_limit']
-        if 'memswap_limit' in create_kwargs:
-            del create_kwargs['memswap_limit']
+        client = __context__['docker.client']
+        host_config_args = inspect_module.getargspec(docker.utils.create_host_config).args
+        create_kwargs['host_config'] = client.create_host_config(
+            **dict((arg, create_kwargs.pop(arg, None)) for arg in host_config_args if arg != 'version')
+        )
 
     log.debug(
         'dockerng.create is using the following kwargs to create '

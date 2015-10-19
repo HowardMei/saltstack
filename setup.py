@@ -401,7 +401,7 @@ class DownloadWindowsDlls(Command):
                         from contextlib import closing
                         with closing(requests.get(furl, stream=True)) as req:
                             if req.status_code == 200:
-                                with open(fdest, 'w') as wfh:
+                                with open(fdest, 'wb') as wfh:
                                     for chunk in req.iter_content(chunk_size=4096):
                                         if chunk:  # filter out keep-alive new chunks
                                             wfh.write(chunk)
@@ -416,7 +416,7 @@ class DownloadWindowsDlls(Command):
                         req = urlopen(furl)
 
                         if req.getcode() == 200:
-                            with open(fdest, 'w') as wfh:
+                            with open(fdest, 'wb') as wfh:
                                 while True:
                                     for chunk in req.read(4096):
                                         if not chunk:
@@ -791,6 +791,7 @@ class SaltDistribution(distutils.dist.Distribution):
         * salt-cp
         * salt-minion
         * salt-unity
+        * salt-proxy
 
     When packaged for salt-ssh, the following scripts should be installed:
         * salt-call
@@ -978,6 +979,7 @@ class SaltDistribution(distutils.dist.Distribution):
         if IS_WINDOWS_PLATFORM:
             data_files[0][1].extend(['doc/man/salt-cp.1',
                                      'doc/man/salt-minion.1',
+                                     'doc/man/salt-proxy.1',
                                      'doc/man/salt-unity.1'])
             return data_files
 
@@ -988,6 +990,7 @@ class SaltDistribution(distutils.dist.Distribution):
                                  'doc/man/salt-key.1',
                                  'doc/man/salt-master.1',
                                  'doc/man/salt-minion.1',
+                                 'doc/man/salt-proxy.1',
                                  'doc/man/salt-run.1',
                                  'doc/man/spm.1',
                                  'doc/man/salt-ssh.1',
@@ -1029,6 +1032,7 @@ class SaltDistribution(distutils.dist.Distribution):
         if IS_WINDOWS_PLATFORM:
             scripts.extend(['scripts/salt-cp',
                             'scripts/salt-minion',
+                            'scripts/salt-proxy',
                             'scripts/salt-unity'])
             return scripts
 
@@ -1044,6 +1048,7 @@ class SaltDistribution(distutils.dist.Distribution):
                         'scripts/salt-ssh',
                         'scripts/salt-syndic',
                         'scripts/salt-unity',
+                        'scripts/salt-proxy',
                         'scripts/spm'])
         return scripts
 

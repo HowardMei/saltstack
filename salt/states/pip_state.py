@@ -250,6 +250,12 @@ def installed(name,
     '''
     Make sure the package is installed
 
+    .. note::
+
+        There is a known issue when using pip v1.0 that causes ``pip install`` to return
+        1 when executed without arguments. See :issue:`21845` for details and
+        potential workarounds.
+
     name
         The name of the python package to install. You can also specify version
         numbers here using the standard operators ``==, >=, <=``. If
@@ -390,7 +396,18 @@ def installed(name,
     env_vars
         Add or modify environment variables. Useful for tweaking build steps,
         such as specifying INCLUDE or LIBRARY paths in Makefiles, build scripts or
-        compiler calls.
+        compiler calls.  This must be in the form of a dictionary or a mapping.
+
+        Example:
+
+        .. code-block:: yaml
+
+            django:
+              pip.installed:
+                - name: django_app
+                - env_vars:
+                    CUSTOM_PATH: /opt/django_app
+                    VERBOSE: True
 
     use_vt
         Use VT terminal emulation (see ouptut while installing)
@@ -499,7 +516,13 @@ def installed(name,
         bin_env = env
 
     # If pkgs is present, ignore name
-    if not pkgs:
+    if pkgs:
+        if not isinstance(pkgs, list):
+            return {'name': name,
+                    'result': False,
+                    'changes': {},
+                    'comment': 'pkgs argument must be formatted as a list'}
+    else:
         pkgs = [name]
 
     # Assumption: If `pkg` is not an `string`, it's a `collections.OrderedDict`

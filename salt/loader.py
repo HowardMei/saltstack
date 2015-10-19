@@ -16,6 +16,7 @@ import time
 import logging
 import inspect
 import tempfile
+import functools
 from collections import MutableMapping
 from zipimport import zipimporter
 
@@ -23,6 +24,7 @@ from zipimport import zipimporter
 from salt.exceptions import LoaderError
 from salt.template import check_render_pipe_str
 from salt.utils.decorators import Depends
+from salt.utils import context
 import salt.utils.lazy
 import salt.utils.event
 import salt.utils.odict
@@ -135,7 +137,8 @@ def minion_mods(
         initial_load=False,
         loaded_base_name=None,
         notify=False,
-        static_modules=None):
+        static_modules=None,
+        proxy=None):
     '''
     Load execution modules
 
@@ -171,20 +174,25 @@ def minion_mods(
         __salt__['test.ping']()
     '''
     # TODO Publish documentation for module whitelisting
-
     if context is None:
         context = {}
     if utils is None:
         utils = {}
+    if proxy is None:
+        proxy = {}
+
     if not whitelist:
         whitelist = opts.get('whitelist_modules', None)
     ret = LazyLoader(_module_dirs(opts, 'modules', 'module'),
                      opts,
                      tag='module',
-                     pack={'__context__': context, '__utils__': utils},
+                     pack={'__context__': context, '__utils__': utils,
+                           '__proxy__': proxy},
                      whitelist=whitelist,
                      loaded_base_name=loaded_base_name,
                      static_modules=static_modules)
+
+    ret.pack['__salt__'] = ret
 
     # Load any provider overrides from the configuration file providers option
     #  Note: Providers can be pkg, service, user or group - not to be confused
@@ -195,7 +203,7 @@ def minion_mods(
             # sometimes providers opts is not to diverge modules but
             # for other configuration
             try:
-                funcs = raw_mod(opts, providers[mod], ret.items())
+                funcs = raw_mod(opts, providers[mod], ret)
             except TypeError:
                 break
             else:
@@ -204,7 +212,6 @@ def minion_mods(
                         f_key = '{0}{1}'.format(mod, func[func.rindex('.'):])
                         ret[f_key] = funcs[func]
 
-    ret.pack['__salt__'] = ret
     if notify:
         evt = salt.utils.event.get_event('minion', opts=opts, listen=False)
         evt.fire_event({'complete': True}, tag='/salt/minion/minion_mod_complete')
@@ -250,16 +257,19 @@ def engines(opts, functions, runners):
                       pack=pack)
 
 
-def proxy(opts, functions, whitelist=None, loaded_base_name=None):
+def proxy(opts, functions=None, returners=None, whitelist=None):
     '''
     Returns the proxy module for this salt-proxy-minion
     '''
-    return LazyLoader(_module_dirs(opts, 'proxy', 'proxy'),
-                      opts,
-                      tag='proxy',
-                      whitelist=whitelist,
-                      pack={'__proxy__': functions},
-                      loaded_base_name=loaded_base_name)
+    ret = LazyLoader(_module_dirs(opts, 'proxy', 'proxy'),
+                     opts,
+                     tag='proxy',
+                     pack={'__salt__': functions,
+                           '__ret__': returners})
+
+    ret.pack['__proxy__'] = ret
+
+    return ret
 
 
 def returners(opts, functions, whitelist=None, context=None):
@@ -781,6 +791,17 @@ def netapi(opts):
                      )
 
 
+def executors(opts, functions=None, context=None):
+    '''
+    Returns the executor modules
+    '''
+    return LazyLoader(_module_dirs(opts, 'executors', 'executor'),
+                      opts,
+                      tag='executor',
+                      pack={'__salt__': functions, '__context__': context or {}},
+                      )
+
+
 def _generate_module(name):
     if name in sys.modules:
         return
@@ -851,6 +872,7 @@ class LazyLoader(salt.utils.lazy.LazyDict):
                  static_modules=None
                  ):  # pylint: disable=W0231
 
+        self.inject_globals = {}
         self.opts = self.__prep_mod_opts(opts)
 
         self.module_dirs = module_dirs
@@ -884,6 +906,17 @@ class LazyLoader(salt.utils.lazy.LazyDict):
         _generate_module('{0}.int.{1}'.format(self.loaded_base_name, tag))
         _generate_module('{0}.ext'.format(self.loaded_base_name))
         _generate_module('{0}.ext.{1}'.format(self.loaded_base_name, tag))
+
+    def __getitem__(self, item):
+        '''
+        Override the __getitem__ in order to decorate the returned function if we need
+        to last-minute inject globals
+        '''
+        func = super(LazyLoader, self).__getitem__(item)
+        if self.inject_globals:
+            return global_injector_decorator(self.inject_globals)(func)
+        else:
+            return func
 
     def __getattr__(self, mod_name):
         '''
@@ -1367,8 +1400,9 @@ class LazyLoader(salt.utils.lazy.LazyDict):
                             virtual = virtual[0]
                     except Exception as exc:
                         log.error('Exception raised when processing __virtual__ function'
-                                  ' for {0}. Module will not be loaded {1}'.format(
-                                      module_name, exc))
+                                  ' for {0}. Module will not be loaded: {1}'.format(
+                                      module_name, exc),
+                                  exc_info_on_loglevel=logging.DEBUG)
                         virtual = None
                 # Get the module's virtual name
                 virtualname = getattr(mod, '__virtualname__', virtual)
@@ -1462,3 +1496,20 @@ class LazyLoader(salt.utils.lazy.LazyDict):
             return (False, module_name, error_reason)
 
         return (True, module_name, None)
+
+
+def global_injector_decorator(inject_globals):
+    '''
+    Decorator used by the LazyLoader to inject globals into a function at
+    execute time.
+
+    globals
+        Dictionary with global variables to inject
+    '''
+    def inner_decorator(f):
+        @functools.wraps(f)
+        def wrapper(*args, **kwargs):
+            with context.func_globals_inject(f, **inject_globals):
+                return f(*args, **kwargs)
+        return wrapper
+    return inner_decorator

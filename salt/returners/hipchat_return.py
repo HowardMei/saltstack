@@ -40,9 +40,9 @@ Hipchat settings may also be configured as:
       from_name: user@email.com
 
     hipchat_profile:
-      api_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-      api_version: v1
-      from_name: user@email.com
+      hipchat.api_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      hipchat.api_version: v1
+      hipchat.from_name: user@email.com
 
     hipchat:
       profile: hipchat_profile
@@ -65,6 +65,15 @@ To use the alternative configuration, append '--return_config alternative' to th
 .. code-block:: bash
 
     salt '*' test.ping --return hipchat --return_config alternative
+
+To override individual configuration items, append --return_kwargs '{"key:": "value"}' to the salt command.
+
+.. versionadded:: Boron
+
+.. code-block:: bash
+
+    salt '*' test.ping --return hipchat --return_kwargs '{"room_id": "another-room"}'
+
 '''
 from __future__ import absolute_import
 
@@ -205,6 +214,7 @@ def _query(function,
                 data['notify'] = 0
             data = _urlencode(data)
     elif api_version == 'v2':
+        headers['Content-Type'] = 'application/json'
         headers['Authorization'] = 'Bearer {0}'.format(api_key)
         if data:
             data = json.dumps(data)

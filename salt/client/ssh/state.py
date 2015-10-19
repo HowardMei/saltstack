@@ -31,7 +31,7 @@ class SSHState(salt.state.State):
         self.wrapper = wrapper
         super(SSHState, self).__init__(opts, pillar)
 
-    def load_modules(self, data=None):
+    def load_modules(self, data=None, proxy=None):
         '''
         Load up the modules for remote compilation via ssh
         '''
@@ -136,7 +136,7 @@ def prep_trans_tar(file_client, chunks, file_refs, pillar=None):
             [salt.utils.url.create('_grains')],
             [salt.utils.url.create('_renderers')],
             [salt.utils.url.create('_returners')],
-            [salt.utils.url.create('_outputters')],
+            [salt.utils.url.create('_output')],
             [salt.utils.url.create('_utils')],
             ]
     with salt.utils.fopen(lowfn, 'w+') as fp_:
@@ -176,7 +176,8 @@ def prep_trans_tar(file_client, chunks, file_refs, pillar=None):
                             os.makedirs(tgt_dir)
                         shutil.copy(filename, tgt)
                     continue
-    try:  # cwd may not exist if it was removed but salt was run from it
+    try:
+        # cwd may not exist if it was removed but salt was run from it
         cwd = os.getcwd()
     except OSError:
         cwd = None

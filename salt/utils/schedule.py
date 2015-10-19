@@ -274,6 +274,7 @@ import salt.loader
 import salt.minion
 import salt.payload
 import salt.syspaths
+import salt.exceptions
 from salt.utils.odict import OrderedDict
 from salt.utils.process import os_is_running
 
@@ -681,6 +682,8 @@ class Schedule(object):
             if data_returner or self.schedule_returner:
                 if 'returner_config' in data:
                     ret['ret_config'] = data['returner_config']
+                if 'returner_kwargs' in data:
+                    ret['ret_kwargs'] = data['returner_kwargs']
                 rets = []
                 for returner in [data_returner, self.schedule_returner]:
                     if isinstance(returner, str):
@@ -710,7 +713,10 @@ class Schedule(object):
                 load = {'cmd': '_return', 'id': self.opts['id']}
                 for key, value in six.iteritems(mret):
                     load[key] = value
-                channel.send(load)
+                try:
+                    channel.send(load)
+                except salt.exceptions.SaltReqTimeoutError:
+                    log.error('Timeout error during scheduled job: {0}. Salt master could not be reached.'.format(ret['fun']))
 
         except Exception:
             log.exception("Unhandled exception running {0}".format(ret['fun']))

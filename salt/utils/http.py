@@ -3,7 +3,7 @@
 Utils for making various web calls. Primarily designed for REST, SOAP, webhooks
 and the like, but also useful for basic HTTP testing.
 
-.. versionaddedd:: 2015.2
+.. versionadded:: 2015.5.0
 '''
 
 # Import python libs
@@ -313,7 +313,7 @@ def query(url,
             urllib_request.HTTPCookieProcessor(sess_cookies)
         ]
 
-        if url.startswith('https') or port == 443:
+        if url.startswith('https'):
             hostname = request.get_host()
             handlers[0] = urllib_request.HTTPSHandler(1)
             if not HAS_MATCHHOSTNAME:
@@ -323,8 +323,12 @@ def query(url,
                 log.warn(('SSL certificate verification has been explicitly '
                          'disabled. THIS CONNECTION MAY NOT BE SECURE!'))
             else:
+                if ':' in hostname:
+                    hostname, port = hostname.split(':')
+                else:
+                    port = 443
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.connect((hostname, 443))
+                sock.connect((hostname, int(port)))
                 sockwrap = ssl.wrap_socket(
                     sock,
                     ca_certs=ca_bundle,
@@ -402,6 +406,9 @@ def query(url,
 
         if isinstance(data, dict):
             data = urllib.urlencode(data)
+
+        if verify_ssl:
+            req_kwargs['ca_certs'] = ca_bundle
 
         max_body = opts.get('http_max_body', salt.config.DEFAULT_MINION_OPTS['http_max_body'])
         timeout = opts.get('http_request_timeout', salt.config.DEFAULT_MINION_OPTS['http_request_timeout'])
@@ -564,7 +571,6 @@ def get_ca_bundle(opts=None):
 
     # Check Salt first
     for salt_root in file_roots.get('base', []):
-        log.debug('file_roots is {0}'.format(salt_root))
         for path in ('cacert.pem', 'ca-bundle.crt'):
             if os.path.exists(path):
                 return path
@@ -802,11 +808,31 @@ def sanitize_url(url, hide_fields):
         if len(url_comps) > 1:
             log_url += '?'
         for pair in url_comps[1:]:
+            url_tmp = None
             for field in hide_fields:
-                if pair.startswith('{0}='.format(field)):
-                    log_url += '{0}=XXXXXXXXXX&'.format(field)
+                comps_list = pair.split('&')
+                if url_tmp:
+                    url_tmp = url_tmp.split('&')
+                    url_tmp = _sanitize_url_components(url_tmp, field)
                 else:
-                    log_url += '{0}&'.format(pair)
+                    url_tmp = _sanitize_url_components(comps_list, field)
+            log_url += url_tmp
         return log_url.rstrip('&')
     else:
         return str(url)
+
+
+def _sanitize_url_components(comp_list, field):
+    '''
+    Recursive function to sanitize each component of the url.
+    '''
+    if len(comp_list) == 0:
+        return ''
+    elif comp_list[0].startswith('{0}='.format(field)):
+        ret = '{0}=XXXXXXXXXX&'.format(field)
+        comp_list.remove(comp_list[0])
+        return ret + _sanitize_url_components(comp_list, field)
+    else:
+        ret = '{0}&'.format(comp_list[0])
+        comp_list.remove(comp_list[0])
+        return ret + _sanitize_url_components(comp_list, field)

@@ -224,6 +224,22 @@ def get(tgt, fun, expr_form='glob'):
         salt '*' mine.get '*' network.interfaces
         salt '*' mine.get 'os:Fedora' network.interfaces grain
         salt '*' mine.get 'os:Fedora and S@192.168.5.0/24' network.ipaddrs compound
+
+    .. seealso:: Retrieving Mine data from Pillar and Orchestrate
+
+        This execution module is intended to be executed on minions.
+        Master-side operations such as Pillar or Orchestrate that require Mine
+        data should use the :py:mod:`Mine Runner module <salt.runners.mine>`
+        instead; it can be invoked from an SLS file using the
+        :py:func:`saltutil.runner <salt.modules.saltutil.runner>` module. For
+        example:
+
+        .. code-block:: yaml
+
+            {% set minion_ips = salt.saltutil.runner('mine.get',
+                tgt='*',
+                fun='network.ip_addrs',
+                tgt_type='glob') %}
     '''
     if __opts__['file_client'] == 'local':
         ret = {}
@@ -294,12 +310,18 @@ def flush():
     return _mine_send(load, __opts__)
 
 
-def get_docker(interfaces=None, cidrs=None):
+def get_docker(interfaces=None, cidrs=None, with_container_id=False):
     '''
     Get all mine data for 'docker.get_containers' and run an aggregation
     routine. The "interfaces" parameter allows for specifying which network
     interfaces to select ip addresses from. The "cidrs" parameter allows for
     specifying a list of cidrs which the ip address must match.
+
+    with_container_id
+        Boolean, to expose container_id in the list of results
+
+        .. versionadded:: 2015.8.2
+
 
     CLI Example:
 
@@ -358,6 +380,7 @@ def get_docker(interfaces=None, cidrs=None):
 
         # Process each container
         for container in six.itervalues(containers):
+            container_id = container['Info']['Id']
             if container['Image'] not in proxy_lists:
                 proxy_lists[container['Image']] = {}
             for dock_port in container['Ports']:
@@ -366,12 +389,22 @@ def get_docker(interfaces=None, cidrs=None):
                 # If port is 0.0.0.0, then we must get the docker host IP
                 if ip_address == '0.0.0.0':
                     for ip_ in host_ips:
-                        proxy_lists[container['Image']].setdefault('ipv4', {}).setdefault(dock_port['PrivatePort'], []).append(
-                            '{0}:{1}'.format(ip_, dock_port['PublicPort']))
-                        proxy_lists[container['Image']]['ipv4'][dock_port['PrivatePort']] = list(set(proxy_lists[container['Image']]['ipv4'][dock_port['PrivatePort']]))
+                        containers = proxy_lists[container['Image']].setdefault('ipv4', {}).setdefault(dock_port['PrivatePort'], [])
+                        container_network_footprint = '{0}:{1}'.format(ip_, dock_port['PublicPort'])
+                        if with_container_id:
+                            value = (container_network_footprint, container_id)
+                        else:
+                            value = container_network_footprint
+                        if value not in containers:
+                            containers.append(value)
                 elif ip_address:
-                    proxy_lists[container['Image']].setdefault('ipv4', {}).setdefault(dock_port['PrivatePort'], []).append(
-                        '{0}:{1}'.format(dock_port['IP'], dock_port['PublicPort']))
-                    proxy_lists[container['Image']]['ipv4'][dock_port['PrivatePort']] = list(set(proxy_lists[container['Image']]['ipv4'][dock_port['PrivatePort']]))
+                    containers = proxy_lists[container['Image']].setdefault('ipv4', {}).setdefault(dock_port['PrivatePort'], [])
+                    container_network_footprint = '{0}:{1}'.format(dock_port['IP'], dock_port['PublicPort'])
+                    if with_container_id:
+                        value = (container_network_footprint, container_id)
+                    else:
+                        value = container_network_footprint
+                    if value not in containers:
+                        containers.append(value)
 
     return proxy_lists

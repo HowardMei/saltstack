@@ -6,6 +6,7 @@ involves preparing the three listeners and the workers needed by the master.
 
 # Import python libs
 from __future__ import absolute_import
+import copy
 import os
 import re
 import sys
@@ -48,6 +49,7 @@ import salt.fileserver
 import salt.daemons.masterapi
 import salt.defaults.exitcodes
 import salt.transport.server
+import salt.log.setup
 import salt.utils.atomicfile
 import salt.utils.event
 import salt.utils.job
@@ -131,13 +133,13 @@ class Maintenance(MultiprocessingProcess):
     A generalized maintenance process which performances maintenance
     routines.
     '''
-    def __init__(self, opts):
+    def __init__(self, opts, **kwargs):
         '''
         Create a maintenance instance
 
         :param dict opts: The salt options
         '''
-        super(Maintenance, self).__init__()
+        super(Maintenance, self).__init__(**kwargs)
         self.opts = opts
         # How often do we perform the maintenance tasks
         self.loop_interval = int(self.opts['loop_interval'])
@@ -386,22 +388,11 @@ class Master(SMaster):
         errors = []
         critical_errors = []
 
-        if salt.utils.is_windows() and self.opts['user'] == 'root':
-            # 'root' doesn't typically exist on Windows. Use the current user
-            # home directory instead.
-            home = os.path.expanduser('~')
-        else:
-            home = os.path.expanduser('~' + self.opts['user'])
         try:
-            if salt.utils.is_windows() and not os.path.isdir(home):
-                # On Windows, Service account home directories may not
-                # initially exist. If this is the case, make sure the
-                # directory exists before continuing.
-                os.mkdir(home, 0o755)
-            os.chdir(home)
+            os.chdir('/')
         except OSError as err:
             errors.append(
-                'Cannot change to home directory {0} ({1})'.format(home, err)
+                'Cannot change to root directory ({1})'.format(err)
             )
 
         fileserver = salt.fileserver.Fileserver(self.opts)
@@ -420,13 +411,21 @@ class Master(SMaster):
         if not self.opts['fileserver_backend']:
             errors.append('No fileserver backends are configured')
 
-        if any('git' in ext_pillar
-               for ext_pillar in self.opts.get('ext_pillar', [])):
+        non_legacy_git_pillars = [
+            x for x in self.opts.get('ext_pillar', [])
+            if 'git' in x
+            and not isinstance(x['git'], six.string_types)
+        ]
+        if non_legacy_git_pillars:
+            new_opts = copy.deepcopy(self.opts)
+            new_opts['ext_pillar'] = non_legacy_git_pillars
             try:
                 # Init any values needed by the git ext pillar
-                salt.utils.gitfs.GitPillar(self.opts)
+                salt.utils.gitfs.GitPillar(new_opts)
             except FileserverConfigError as exc:
                 critical_errors.append(exc.strerror)
+            finally:
+                del new_opts
 
         if errors or critical_errors:
             for error in errors:
@@ -438,11 +437,12 @@ class Master(SMaster):
 
     # run_reqserver cannot be defined within a class method in order for it
     # to be picklable.
-    def run_reqserver(self):
+    def run_reqserver(self, **kwargs):
         reqserv = ReqServer(
             self.opts,
             self.key,
-            self.master_key)
+            self.master_key,
+            **kwargs)
         reqserv.run()
 
     def start(self):
@@ -511,7 +511,12 @@ class Master(SMaster):
             time.sleep(2)
 
         log.info('Creating master request server process')
-        process_manager.add_process(self.run_reqserver)
+        kwargs = {}
+        if salt.utils.is_windows():
+            kwargs['log_queue'] = (
+                    salt.log.setup.get_multiprocessing_logging_queue())
+        process_manager.add_process(self.run_reqserver, kwargs=kwargs)
+
         try:
             process_manager.run()
         except KeyboardInterrupt:
@@ -525,13 +530,13 @@ class Halite(MultiprocessingProcess):
     '''
     Manage the Halite server
     '''
-    def __init__(self, hopts):
+    def __init__(self, hopts, **kwargs):
         '''
         Create a halite instance
 
         :param dict hopts: The halite options
         '''
-        super(Halite, self).__init__()
+        super(Halite, self).__init__(**kwargs)
         self.hopts = hopts
 
     def run(self):
@@ -565,7 +570,7 @@ class ReqServer(object):
     Starts up the master request server, minions send results to this
     interface.
     '''
-    def __init__(self, opts, key, mkey):
+    def __init__(self, opts, key, mkey, log_queue=None):
         '''
         Create a request server
 
@@ -580,6 +585,7 @@ class ReqServer(object):
         self.master_key = mkey
         # Prepare the AES key
         self.key = key
+        self.log_queue = log_queue
 
     def __bind(self):
         '''
@@ -594,10 +600,21 @@ class ReqServer(object):
         self.process_manager = salt.utils.process.ProcessManager(name='ReqServer_ProcessManager')
 
         req_channels = []
+        tcp_only = True
         for transport, opts in iter_transport_opts(self.opts):
             chan = salt.transport.server.ReqServerChannel.factory(opts)
             chan.pre_fork(self.process_manager)
             req_channels.append(chan)
+            if transport != 'tcp':
+                tcp_only = False
+
+        kwargs = {}
+        if salt.utils.is_windows():
+            kwargs['log_queue'] = self.log_queue
+            # Use one worker thread if the only TCP transport is set up on Windows. See #27188.
+            if tcp_only:
+                log.warning("TCP transport is currently supporting the only 1 worker on Windows.")
+                self.opts['worker_threads'] = 1
 
         for ind in range(int(self.opts['worker_threads'])):
             self.process_manager.add_process(MWorker,
@@ -606,6 +623,7 @@ class ReqServer(object):
                                                    self.key,
                                                    req_channels,
                                                    ),
+                                             kwargs=kwargs
                                              )
         try:
             self.process_manager.run()
@@ -648,7 +666,8 @@ class MWorker(MultiprocessingProcess):
                  opts,
                  mkey,
                  key,
-                 req_channels):
+                 req_channels,
+                 **kwargs):
         '''
         Create a salt master worker process
 
@@ -659,7 +678,7 @@ class MWorker(MultiprocessingProcess):
         :rtype: MWorker
         :return: Master worker
         '''
-        MultiprocessingProcess.__init__(self)
+        MultiprocessingProcess.__init__(self, **kwargs)
         self.opts = opts
         self.req_channels = req_channels
 
@@ -673,7 +692,7 @@ class MWorker(MultiprocessingProcess):
     # These methods are only used when pickling so will not be used on
     # non-Windows platforms.
     def __setstate__(self, state):
-        MultiprocessingProcess.__init__(self)
+        MultiprocessingProcess.__init__(self, log_queue=state['log_queue'])
         self.opts = state['opts']
         self.req_channels = state['req_channels']
         self.mkey = state['mkey']
@@ -687,6 +706,7 @@ class MWorker(MultiprocessingProcess):
                 'mkey': self.mkey,
                 'key': self.key,
                 'k_mtime': self.k_mtime,
+                'log_queue': self.log_queue,
                 'secrets': SMaster.secrets}
 
     def __bind(self):
@@ -1200,8 +1220,11 @@ class AESFuncs(object):
 
         :param dict load: The minion payload
         '''
-        salt.utils.job.store_job(
-            self.opts, load, event=self.event, mminion=self.mminion)
+        try:
+            salt.utils.job.store_job(
+                self.opts, load, event=self.event, mminion=self.mminion)
+        except salt.exceptions.SaltCacheError:
+            log.error('Could not store job information for load: {0}'.format(load))
 
     def _syndic_return(self, load):
         '''
@@ -1715,12 +1738,14 @@ class ClearFuncs(object):
                 if not found:
                     log.warning('Authentication failure of type "eauth" occurred.')
                     return ''
-            if not self.loadauth.time_auth(clear_load):
-                log.warning('Authentication failure of type "eauth" occurred.')
-                return ''
 
             clear_load['groups'] = groups
-            return self.loadauth.mk_token(clear_load)
+            token = self.loadauth.mk_token(clear_load)
+            if not token:
+                log.warning('Authentication failure of type "eauth" occurred.')
+                return ''
+            else:
+                return token
         except Exception as exc:
             type_, value_, traceback_ = sys.exc_info()
             log.error(
@@ -1789,10 +1814,11 @@ class ClearFuncs(object):
             # If there are groups in the token, check if any of them are listed in the eauth config
             group_auth_match = False
             try:
-                for group in token['groups']:
-                    if group in eauth_groups:
-                        group_auth_match = True
-                        break
+                if token.get('groups'):
+                    for group in token['groups']:
+                        if group in eauth_groups:
+                            group_auth_match = True
+                            break
             except KeyError:
                 pass
             if '*' not in eauth_users and token['name'] not in eauth_users and not group_auth_match:
@@ -2156,6 +2182,12 @@ class ClearFuncs(object):
 
             if 'metadata' in clear_load['kwargs']:
                 load['metadata'] = clear_load['kwargs'].get('metadata')
+
+            if 'module_executors' in clear_load['kwargs']:
+                load['module_executors'] = clear_load['kwargs'].get('module_executors')
+
+            if 'ret_kwargs' in clear_load['kwargs']:
+                load['ret_kwargs'] = clear_load['kwargs'].get('ret_kwargs')
 
         if 'user' in clear_load:
             log.info(

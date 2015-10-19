@@ -25,11 +25,11 @@ from salt.utils import vt
 import salt.utils
 import salt.utils.timed_subprocess
 import salt.grains.extra
-from salt.ext.six import string_types
+import salt.ext.six as six
 from salt.exceptions import CommandExecutionError, TimedProcTimeoutError
 from salt.log import LOG_LEVELS
-import salt.ext.six as six
 from salt.ext.six.moves import range
+from salt.ext.six.moves import shlex_quote as _cmd_quote
 
 # Only available on POSIX systems, nonfatal on windows
 try:
@@ -52,6 +52,19 @@ def __virtual__():
     with pdb a bit harder so lets do it this way instead.
     '''
     return __virtualname__
+
+
+def _check_cb(cb_):
+    '''
+    If the callback is None or is not callable, return a lambda that returns
+    the value passed.
+    '''
+    if cb_ is not None:
+        if hasattr(cb_, '__call__'):
+            return cb_
+        else:
+            log.error('log_callback is not callable, ignoring')
+    return lambda x: x
 
 
 def _python_shell_default(python_shell, __pub_jid):
@@ -143,7 +156,7 @@ def _check_loglevel(level='info', quiet=False):
     '''
     def _bad_level(level):
         log.error(
-            'Invalid output_loglevel {0!r}. Valid levels are: {1}. Falling '
+            'Invalid output_loglevel \'{0}\'. Valid levels are: {1}. Falling '
             'back to \'info\'.'
             .format(
                 level,
@@ -201,6 +214,7 @@ def _run(cmd,
          stdout=subprocess.PIPE,
          stderr=subprocess.PIPE,
          output_loglevel='debug',
+         log_callback=None,
          runas=None,
          shell=DEFAULT_SHELL,
          python_shell=False,
@@ -225,6 +239,8 @@ def _run(cmd,
             'Attempt to run a shell command with what may be an invalid shell! '
             'Check to ensure that the shell <{0}> is valid for this user.'
             .format(shell))
+
+    log_callback = _check_cb(log_callback)
 
     # Set the default working directory to the home directory of the user
     # salt-minion is running as. Defaults to home directory of user under which
@@ -274,7 +290,7 @@ def _run(cmd,
     env = _parse_env(env)
 
     for bad_env_key in (x for x, y in six.iteritems(env) if y is None):
-        log.error('Environment variable {0!r} passed without a value. '
+        log.error('Environment variable \'{0}\' passed without a value. '
                   'Setting value to an empty string'.format(bad_env_key))
         env[bad_env_key] = ''
 
@@ -289,7 +305,7 @@ def _run(cmd,
             pwd.getpwnam(runas)
         except KeyError:
             raise CommandExecutionError(
-                'User {0!r} is not available'.format(runas)
+                'User \'{0}\' is not available'.format(runas)
             )
         try:
             # Getting the environment for the runas user
@@ -327,7 +343,7 @@ def _run(cmd,
                     env[key] = val.encode(fse)
         except ValueError:
             raise CommandExecutionError(
-                'Environment could not be retrieved for User {0!r}'.format(
+                'Environment could not be retrieved for User \'{0}\''.format(
                     runas
                 )
             )
@@ -336,11 +352,15 @@ def _run(cmd,
         # Always log the shell commands at INFO unless quiet logging is
         # requested. The command output is what will be controlled by the
         # 'loglevel' parameter.
-        log.info(
-            'Executing command {0!r} {1}in directory {2!r}'.format(
-                cmd, 'as user {0!r} '.format(runas) if runas else '', cwd
+        msg = (
+            'Executing command {0}{1}{0} {2}in directory \'{3}\''.format(
+                '\'' if not isinstance(cmd, list) else '',
+                cmd,
+                'as user \'{0}\' '.format(runas) if runas else '',
+                cwd
             )
         )
+        log.info(log_callback(msg))
 
     if reset_system_locale is True:
         if not salt.utils.is_windows():
@@ -401,7 +421,7 @@ def _run(cmd,
 
     if not os.path.isabs(cwd) or not os.path.isdir(cwd):
         raise CommandExecutionError(
-            'Specified cwd {0!r} either not absolute or does not exist'
+            'Specified cwd \'{0}\' either not absolute or does not exist'
             .format(cwd)
         )
 
@@ -416,8 +436,8 @@ def _run(cmd,
             proc = salt.utils.timed_subprocess.TimedProc(cmd, **kwargs)
         except (OSError, IOError) as exc:
             raise CommandExecutionError(
-                'Unable to run command {0!r} with the context {1!r}, reason: {2}'
-                .format(cmd, kwargs, exc)
+                'Unable to run command \'{0}\' with the context \'{1}\', '
+                'reason: {2}'.format(cmd, kwargs, exc)
             )
 
         try:
@@ -447,7 +467,8 @@ def _run(cmd,
         if timeout:
             to = ' (timeout: {0}s)'.format(timeout)
         if _check_loglevel(output_loglevel) is not None:
-            log.debug('Running {0} in VT{1}'.format(cmd, to))
+            msg = 'Running {0} in VT{1}'.format(cmd, to)
+            log.debug(log_callback(msg))
         stdout, stderr = '', ''
         now = time.time()
         if timeout:
@@ -545,6 +566,7 @@ def _run_quiet(cmd,
                 stdin=stdin,
                 stderr=subprocess.STDOUT,
                 output_loglevel='quiet',
+                log_callback=None,
                 shell=shell,
                 python_shell=python_shell,
                 env=env,
@@ -583,6 +605,7 @@ def _run_all_quiet(cmd,
                 python_shell=python_shell,
                 env=env,
                 output_loglevel='quiet',
+                log_callback=None,
                 template=template,
                 umask=umask,
                 timeout=timeout,
@@ -604,6 +627,7 @@ def run(cmd,
         rstrip=True,
         umask=None,
         output_loglevel='debug',
+        log_callback=None,
         timeout=None,
         reset_system_locale=True,
         ignore_retcode=False,
@@ -635,7 +659,7 @@ def run(cmd,
         Shell to execute under. Defaults to the system default shell.
 
     python_shell
-        If True, let python handle the positional arguments. Set to False
+        If False, let python handle the positional arguments. Set to True
         to use shell features, such as pipes or redirection
 
     env
@@ -773,6 +797,7 @@ def run(cmd,
                rstrip=rstrip,
                umask=umask,
                output_loglevel=output_loglevel,
+               log_callback=log_callback,
                timeout=timeout,
                reset_system_locale=reset_system_locale,
                ignore_retcode=ignore_retcode,
@@ -780,6 +805,8 @@ def run(cmd,
                pillarenv=kwargs.get('pillarenv'),
                pillar_override=kwargs.get('pillar'),
                use_vt=use_vt)
+
+    log_callback = _check_cb(log_callback)
 
     if 'pid' in ret and '__pub_jid' in kwargs:
         # Stuff the child pid in the JID file
@@ -807,11 +834,14 @@ def run(cmd,
         if not ignore_retcode and ret['retcode'] != 0:
             if lvl < LOG_LEVELS['error']:
                 lvl = LOG_LEVELS['error']
-            log.error(
-                'Command {0!r} failed with return code: {1}'
-                .format(cmd, ret['retcode'])
+            msg = (
+                'Command \'{0}\' failed with return code: {1}'.format(
+                    cmd,
+                    ret['retcode']
+                )
             )
-        log.log(lvl, 'output: {0}'.format(ret['stdout']))
+            log.error(log_callback(msg))
+        log.log(lvl, 'output: {0}'.format(log_callback(ret['stdout'])))
     return ret['stdout']
 
 
@@ -826,6 +856,7 @@ def shell(cmd,
         rstrip=True,
         umask=None,
         output_loglevel='debug',
+        log_callback=None,
         quiet=False,
         timeout=None,
         reset_system_locale=True,
@@ -987,6 +1018,7 @@ def shell(cmd,
         rstrip=rstrip,
         umask=umask,
         output_loglevel=output_loglevel,
+        log_callback=log_callback,
         quiet=quiet,
         timeout=timeout,
         reset_system_locale=reset_system_locale,
@@ -1009,6 +1041,7 @@ def run_stdout(cmd,
                rstrip=True,
                umask=None,
                output_loglevel='debug',
+               log_callback=None,
                timeout=None,
                reset_system_locale=True,
                ignore_retcode=False,
@@ -1037,7 +1070,7 @@ def run_stdout(cmd,
         Shell to execute under. Defaults to the system default shell.
 
     python_shell
-        If True, let python handle the positional arguments. Set to False
+        If False, let python handle the positional arguments. Set to True
         to use shell features, such as pipes or redirection
 
     env
@@ -1149,6 +1182,7 @@ def run_stdout(cmd,
                rstrip=rstrip,
                umask=umask,
                output_loglevel=output_loglevel,
+               log_callback=log_callback,
                timeout=timeout,
                reset_system_locale=reset_system_locale,
                ignore_retcode=ignore_retcode,
@@ -1157,19 +1191,24 @@ def run_stdout(cmd,
                pillar_override=kwargs.get('pillar'),
                use_vt=use_vt)
 
+    log_callback = _check_cb(log_callback)
+
     lvl = _check_loglevel(output_loglevel)
     if lvl is not None:
         if not ignore_retcode and ret['retcode'] != 0:
             if lvl < LOG_LEVELS['error']:
                 lvl = LOG_LEVELS['error']
-            log.error(
-                'Command {0!r} failed with return code: {1}'
-                .format(cmd, ret['retcode'])
+            msg = (
+                'Command \'{0}\' failed with return code: {1}'.format(
+                    cmd,
+                    ret['retcode']
+                )
             )
+            log.error(log_callback(msg))
         if ret['stdout']:
-            log.log(lvl, 'stdout: {0}'.format(ret['stdout']))
+            log.log(lvl, 'stdout: {0}'.format(log_callback(ret['stdout'])))
         if ret['stderr']:
-            log.log(lvl, 'stderr: {0}'.format(ret['stderr']))
+            log.log(lvl, 'stderr: {0}'.format(log_callback(ret['stderr'])))
         if ret['retcode']:
             log.log(lvl, 'retcode: {0}'.format(ret['retcode']))
     return ret['stdout']
@@ -1187,6 +1226,7 @@ def run_stderr(cmd,
                rstrip=True,
                umask=None,
                output_loglevel='debug',
+               log_callback=None,
                timeout=None,
                reset_system_locale=True,
                ignore_retcode=False,
@@ -1215,7 +1255,7 @@ def run_stderr(cmd,
         Shell to execute under. Defaults to the system default shell.
 
     python_shell
-        If True, let python handle the positional arguments. Set to False
+        If False, let python handle the positional arguments. Set to True
         to use shell features, such as pipes or redirection
 
     env
@@ -1326,6 +1366,7 @@ def run_stderr(cmd,
                rstrip=rstrip,
                umask=umask,
                output_loglevel=output_loglevel,
+               log_callback=log_callback,
                timeout=timeout,
                reset_system_locale=reset_system_locale,
                ignore_retcode=ignore_retcode,
@@ -1334,19 +1375,24 @@ def run_stderr(cmd,
                pillarenv=kwargs.get('pillarenv'),
                pillar_override=kwargs.get('pillar'))
 
+    log_callback = _check_cb(log_callback)
+
     lvl = _check_loglevel(output_loglevel)
     if lvl is not None:
         if not ignore_retcode and ret['retcode'] != 0:
             if lvl < LOG_LEVELS['error']:
                 lvl = LOG_LEVELS['error']
-            log.error(
-                'Command {0!r} failed with return code: {1}'
-                .format(cmd, ret['retcode'])
+            msg = (
+                'Command \'{0}\' failed with return code: {1}'.format(
+                    cmd,
+                    ret['retcode']
+                )
             )
+            log.error(log_callback(msg))
         if ret['stdout']:
-            log.log(lvl, 'stdout: {0}'.format(ret['stdout']))
+            log.log(lvl, 'stdout: {0}'.format(log_callback(ret['stdout'])))
         if ret['stderr']:
-            log.log(lvl, 'stderr: {0}'.format(ret['stderr']))
+            log.log(lvl, 'stderr: {0}'.format(log_callback(ret['stderr'])))
         if ret['retcode']:
             log.log(lvl, 'retcode: {0}'.format(ret['retcode']))
     return ret['stderr']
@@ -1364,6 +1410,7 @@ def run_all(cmd,
             rstrip=True,
             umask=None,
             output_loglevel='debug',
+            log_callback=None,
             timeout=None,
             reset_system_locale=True,
             ignore_retcode=False,
@@ -1392,7 +1439,7 @@ def run_all(cmd,
         Shell to execute under. Defaults to the system default shell.
 
     python_shell
-        If True, let python handle the positional arguments. Set to False
+        If False, let python handle the positional arguments. Set to True
         to use shell features, such as pipes or redirection
 
     env
@@ -1503,6 +1550,7 @@ def run_all(cmd,
                rstrip=rstrip,
                umask=umask,
                output_loglevel=output_loglevel,
+               log_callback=log_callback,
                timeout=timeout,
                reset_system_locale=reset_system_locale,
                ignore_retcode=ignore_retcode,
@@ -1511,19 +1559,24 @@ def run_all(cmd,
                pillar_override=kwargs.get('pillar'),
                use_vt=use_vt)
 
+    log_callback = _check_cb(log_callback)
+
     lvl = _check_loglevel(output_loglevel)
     if lvl is not None:
         if not ignore_retcode and ret['retcode'] != 0:
             if lvl < LOG_LEVELS['error']:
                 lvl = LOG_LEVELS['error']
-            log.error(
-                'Command {0!r} failed with return code: {1}'
-                .format(cmd, ret['retcode'])
+            msg = (
+                'Command \'{0}\' failed with return code: {1}'.format(
+                    cmd,
+                    ret['retcode']
+                )
             )
+            log.error(log_callback(msg))
         if ret['stdout']:
-            log.log(lvl, 'stdout: {0}'.format(ret['stdout']))
+            log.log(lvl, 'stdout: {0}'.format(log_callback(ret['stdout'])))
         if ret['stderr']:
-            log.log(lvl, 'stderr: {0}'.format(ret['stderr']))
+            log.log(lvl, 'stderr: {0}'.format(log_callback(ret['stderr'])))
         if ret['retcode']:
             log.log(lvl, 'retcode: {0}'.format(ret['retcode']))
     return ret
@@ -1540,6 +1593,7 @@ def retcode(cmd,
             template=None,
             umask=None,
             output_loglevel='debug',
+            log_callback=None,
             timeout=None,
             reset_system_locale=True,
             ignore_retcode=False,
@@ -1568,7 +1622,7 @@ def retcode(cmd,
         Shell to execute under. Defaults to the system default shell.
 
     python_shell
-        If True, let python handle the positional arguments. Set to False
+        If False, let python handle the positional arguments. Set to True
         to use shell features, such as pipes or redirection
 
     env
@@ -1681,6 +1735,7 @@ def retcode(cmd,
               template=template,
               umask=umask,
               output_loglevel=output_loglevel,
+              log_callback=log_callback,
               timeout=timeout,
               reset_system_locale=reset_system_locale,
               ignore_retcode=ignore_retcode,
@@ -1689,16 +1744,21 @@ def retcode(cmd,
               pillar_override=kwargs.get('pillar'),
               use_vt=use_vt)
 
+    log_callback = _check_cb(log_callback)
+
     lvl = _check_loglevel(output_loglevel)
     if lvl is not None:
         if not ignore_retcode and ret['retcode'] != 0:
             if lvl < LOG_LEVELS['error']:
                 lvl = LOG_LEVELS['error']
-            log.error(
-                'Command {0!r} failed with return code: {1}'
-                .format(cmd, ret['retcode'])
+            msg = (
+                'Command \'{0}\' failed with return code: {1}'.format(
+                    cmd,
+                    ret['retcode']
+                )
             )
-        log.log(lvl, 'output: {0}'.format(ret['stdout']))
+            log.error(log_callback(msg))
+        log.log(lvl, 'output: {0}'.format(log_callback(ret['stdout'])))
     return ret['retcode']
 
 
@@ -1713,6 +1773,7 @@ def _retcode_quiet(cmd,
                    template=None,
                    umask=None,
                    output_loglevel='quiet',
+                   log_callback=None,
                    timeout=None,
                    reset_system_locale=True,
                    ignore_retcode=False,
@@ -1734,6 +1795,7 @@ def _retcode_quiet(cmd,
                    template=template,
                    umask=umask,
                    output_loglevel=output_loglevel,
+                   log_callback=log_callback,
                    timeout=timeout,
                    reset_system_locale=reset_system_locale,
                    ignore_retcode=ignore_retcode,
@@ -1753,6 +1815,7 @@ def script(source,
            template=None,
            umask=None,
            output_loglevel='debug',
+           log_callback=None,
            quiet=False,
            timeout=None,
            reset_system_locale=True,
@@ -1795,7 +1858,7 @@ def script(source,
         Shell to execute under. Defaults to the system default shell.
 
     python_shell
-        If True, let python handle the positional arguments. Set to False
+        If False, let python handle the positional arguments. Set to True
         to use shell features, such as pipes or redirection
 
     env
@@ -1888,10 +1951,14 @@ def script(source,
         try:
             os.remove(path)
         except (IOError, OSError) as exc:
-            log.error('cmd.script: Unable to clean tempfile {0!r}: {1}'
-                      .format(path, exc))
+            log.error(
+                'cmd.script: Unable to clean tempfile \'{0}\': {1}'.format(
+                    path,
+                    exc
+                )
+            )
 
-    if isinstance(__env__, string_types):
+    if isinstance(__env__, six.string_types):
         salt.utils.warn_until(
             'Boron',
             'Passing a salt environment should be done using \'saltenv\' not '
@@ -1935,6 +2002,7 @@ def script(source,
                cwd=cwd,
                stdin=stdin,
                output_loglevel=output_loglevel,
+               log_callback=log_callback,
                runas=runas,
                shell=shell,
                python_shell=python_shell,
@@ -1965,6 +2033,7 @@ def script_retcode(source,
                    __env__=None,
                    saltenv='base',
                    output_loglevel='debug',
+                   log_callback=None,
                    use_vt=False,
                    **kwargs):
     '''
@@ -2006,7 +2075,7 @@ def script_retcode(source,
         Shell to execute under. Defaults to the system default shell.
 
     python_shell
-        If True, let python handle the positional arguments. Set to False
+        If False, let python handle the positional arguments. Set to True
         to use shell features, such as pipes or redirection
 
     env
@@ -2110,6 +2179,7 @@ def script_retcode(source,
                   __env__=__env__,
                   saltenv=saltenv,
                   output_loglevel=output_loglevel,
+                  log_callback=log_callback,
                   use_vt=use_vt,
                   **kwargs)['retcode']
 
@@ -2232,6 +2302,7 @@ def run_chroot(root,
                rstrip=True,
                umask=None,
                output_loglevel='quiet',
+               log_callback=None,
                quiet=False,
                timeout=None,
                reset_system_locale=True,
@@ -2267,7 +2338,7 @@ def run_chroot(root,
         Shell to execute under. Defaults to the system default shell.
 
     python_shell
-        If True, let python handle the positional arguments. Set to False
+        If False, let python handle the positional arguments. Set to True
         to use shell features, such as pipes or redirection
 
     env
@@ -2362,7 +2433,7 @@ def run_chroot(root,
 
     if isinstance(cmd, (list, tuple)):
         cmd = ' '.join([str(i) for i in cmd])
-    cmd = 'chroot {0} {1} -c {2!r}'.format(root, sh_, cmd)
+    cmd = 'chroot {0} {1} -c {2}'.format(root, sh_, _cmd_quote(cmd))
 
     run_func = __context__.pop('cmd.run_chroot.func', run_all)
 
@@ -2378,6 +2449,7 @@ def run_chroot(root,
                    rstrip=rstrip,
                    umask=umask,
                    output_loglevel=output_loglevel,
+                   log_callback=log_callback,
                    quiet=quiet,
                    timeout=timeout,
                    reset_system_locale=reset_system_locale,
