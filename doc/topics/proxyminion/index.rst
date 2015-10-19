@@ -1,6 +1,8 @@
-===============================
-Salt Proxy Minion Documentation
-===============================
+.. _proxy-minion:
+
+=================
+Salt Proxy Minion
+=================
 
 Proxy minions are a developing Salt feature that enables controlling devices
 that, for whatever reason, cannot run a standard salt-minion.  Examples include
@@ -22,6 +24,32 @@ and discovery, control, status, remote execution, and state management.
 See the :doc:`Proxy Minion Walkthrough </topics/proxyminion/demo>` for an end-to-end
 demonstration of a working proxy minion.
 
+New in 2015.8.2
+---------------
+
+*BREAKING CHANGE*: Adding the `proxymodule` variable  to __opts__ is deprecated.
+The `proxymodule` variable has been moved a new globally-injected variable
+called `__proxy__`.  A related configuration option called
+`add_proxymodule_to_opts` has been added and defaults to `True`.  In the next
+major release, codenamed Boron, this variable will default to False.
+
+In the meantime, proxies that functioned under 2015.8.0 and .1 should continue
+to work under 2015.8.2.  You should rework your proxy code to use `__proxy__` as
+soon as possible.
+
+The `rest_sample` example proxy minion has been updated to use `__proxy__`.
+
+This change was made because proxymodules are a LazyLoader object, but
+LazyLoaders cannot be serialized.  `__opts__` gets serialized, and so things
+like `saltutil.sync_all` and `state.highstate` would throw exceptions.
+
+Also in this release, proxymodules can be stored on the master in
+/srv/salt/_proxy.  A new saltutil function called `sync_proxies` will transfer
+these to remote proxy minions.  Note that you must restart the salt-proxy
+daemon to pick up these changes.
+
+In addition, a salt.utils helper function called `is_proxy()` was added to make
+it easier to tell when the running minion is a proxy minion.
 
 New in 2015.8
 -------------
@@ -243,7 +271,7 @@ and status; "package" installation, and a ping.
     # -*- coding: utf-8 -*-
     '''
     This is a simple proxy-minion designed to connect to and communicate with
-    the bottle-based web service contained in 
+    the bottle-based web service contained in
     https://github.com/saltstack/salt-contrib/proxyminion_rest_example
     '''
     from __future__ import absolute_import
@@ -276,12 +304,12 @@ and status; "package" installation, and a ping.
         log.debug('rest_sample proxy __virtual__() called...')
         return True
 
-    # Every proxy module needs an 'init', though you can 
+    # Every proxy module needs an 'init', though you can
     # just put a 'pass' here if it doesn't need to do anything.
     def init(opts):
         log.debug('rest_sample proxy init() called...')
 
-        # Save the REST URL 
+        # Save the REST URL
         DETAILS['url'] = opts['proxy']['url']
 
         # Make sure the REST URL ends with a '/'
@@ -292,7 +320,7 @@ and status; "package" installation, and a ping.
     def id(opts):
         '''
         Return a unique ID for this proxy minion.  This ID MUST NOT CHANGE.
-        If it changes while the proxy is running the salt-master will get 
+        If it changes while the proxy is running the salt-master will get
         really confused and may stop talking to this minion
         '''
         r = salt.utils.http.query(opts['proxy']['url']+'id', decode_type='json', decode=True)
@@ -479,16 +507,18 @@ Here is an excerpt from a module that was modified to support proxy-minions:
 .. code-block:: python
 
    __proxyenabled__ = ['*']
-   
+
    [...]
+   def ping():
 
-    def ping():
-
-        if 'proxymodule' in __opts__:
-            ping_cmd = __opts__['proxymodule'].loaded_base_name + '.ping'
+    if not salt.utils.is_proxy():
+        return True
+    else:
+        ping_cmd = __opts__['proxy']['proxytype'] + '.ping'
+        if __opts__.get('add_proxymodule_to_opts', False):
             return __opts__['proxymodule'][ping_cmd]()
         else:
-            return True
+            return __proxy__[ping_cmd]()
 
 And then in salt.proxy.rest_sample.py we find
 
@@ -505,3 +535,8 @@ And then in salt.proxy.rest_sample.py we find
             return False
 
 
+.. toctree::
+    :maxdepth: 2
+    :glob:
+
+    demo

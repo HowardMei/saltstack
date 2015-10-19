@@ -6,7 +6,6 @@ from __future__ import absolute_import
 
 # Import python libs
 import contextlib
-import errno
 import logging
 import hashlib
 import os
@@ -23,6 +22,7 @@ import salt.payload
 import salt.transport
 import salt.fileserver
 import salt.utils
+import salt.utils.files
 import salt.utils.templates
 import salt.utils.url
 import salt.utils.gzip_util
@@ -212,6 +212,7 @@ class Client(object):
 
         ret = []
 
+        path = salt.utils.locales.sdecode(path)
         path = self._check_proto(path)
         # We want to make sure files start with this *directory*, use
         # '/' explicitly because the master (that's generating the
@@ -597,22 +598,9 @@ class Client(object):
 
         destfp = None
         try:
-            if no_cache:
-                result = []
-
-                def on_chunk(chunk):
-                    result.append(chunk)
-            else:
-                dest_tmp = "{0}.part".format(dest)
-                destfp = salt.utils.fopen(dest_tmp, 'wb')
-
-                def on_chunk(chunk):
-                    destfp.write(chunk)
-
             query = salt.utils.http.query(
                 fixed_url,
                 stream=True,
-                streaming_callback=on_chunk,
                 username=url_data.username,
                 password=url_data.password,
                 **get_kwargs
@@ -620,24 +608,12 @@ class Client(object):
             if 'handle' not in query:
                 raise MinionError('Error: {0}'.format(query['error']))
             if no_cache:
-                return ''.join(result)
+                return query['text']
             else:
-                destfp.close()
-                destfp = None
-                # Can't just do an os.rename() here, this results in a
-                # WindowsError being raised when the destination path exists on
-                # a Windows machine. Have to remove the file.
-                try:
-                    os.remove(dest)
-                except OSError as exc:
-                    if exc.errno != errno.ENOENT:
-                        raise MinionError(
-                            'Error: Unable to remove {0}: {1}'.format(
-                                dest,
-                                exc.strerror
-                            )
-                        )
-                os.rename(dest_tmp, dest)
+                dest_tmp = "{0}.part".format(dest)
+                with salt.utils.fopen(dest_tmp, 'wb') as destfp:
+                    destfp.write(query['text'])
+                salt.utils.files.rename(dest_tmp, dest)
                 return dest
         except HTTPError as exc:
             raise MinionError('HTTP error {0} reading {1}: {3}'.format(

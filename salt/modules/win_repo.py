@@ -19,12 +19,20 @@ import salt.utils
 import salt.loader
 import salt.template
 from salt.exceptions import CommandExecutionError, SaltRenderError
+
+# All the "unused" imports here are needed for the imported winrepo runner code
 # pylint: disable=unused-import
 from salt.runners.winrepo import (
     genrepo as _genrepo,
     update_git_repos as _update_git_repos,
-    PER_REMOTE_PARAMS
+    PER_REMOTE_OVERRIDES
 )
+from salt.ext import six
+try:
+    import msgpack
+except ImportError:
+    import msgpack_pure as msgpack  # pylint: disable=import-error
+import salt.utils.gitfs
 # pylint: enable=unused-import
 
 log = logging.getLogger(__name__)
@@ -78,7 +86,7 @@ def genrepo():
     return _genrepo(opts=__opts__, fire_event=False)
 
 
-def update_git_repos():
+def update_git_repos(clean=False):
     '''
     Checkout git repos containing :ref:`Windows Software Package Definitions
     <windows-package-manager>`
@@ -89,6 +97,24 @@ def update_git_repos():
         permits the git executable to be run from the Command Prompt.
 
     .. _`Git for Windows`: https://git-for-windows.github.io/
+
+    clean : False
+        Clean repo cachedirs which are not configured under
+        :conf_minion:`winrepo_remotes`.
+
+        .. note::
+            This option only applies if either pygit2_ or GitPython_ is
+            installed into Salt's bundled Python.
+
+        .. warning::
+            This argument should not be set to ``True`` if a mix of git and
+            non-git repo definitions are being used, as it will result in the
+            non-git repo definitions being removed.
+
+        .. versionadded:: 2015.8.0
+
+        .. _GitPython: https://github.com/gitpython-developers/GitPython
+        .. _pygit2: https://github.com/libgit2/pygit2
 
     CLI Example:
 
@@ -101,7 +127,7 @@ def update_git_repos():
             'Git for Windows is not installed, or not configured to be '
             'accessible from the Command Prompt'
         )
-    return _update_git_repos(opts=__opts__, masterless=True)
+    return _update_git_repos(opts=__opts__, clean=clean, masterless=True)
 
 
 def show_sls(name, saltenv='base'):

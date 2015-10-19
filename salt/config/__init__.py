@@ -32,6 +32,7 @@ from salt.ext.six.moves.urllib.parse import urlparse
 
 # Import salt libs
 import salt.utils
+import salt.utils.dictupdate
 import salt.utils.network
 import salt.syspaths
 import salt.utils.validate.path
@@ -370,6 +371,9 @@ VALID_OPTS = {
     # in the event of a disconnect event
     'recon_randomize': float,  # FIXME This should really be a bool, according to the implementation
 
+    'return_retry_timer': int,
+    'return_retry_random': bool,
+
     # Specify a returner in which all events will be sent to. Requires that the returner in question
     # have an event_return(event) function!
     'event_return': str,
@@ -417,6 +421,11 @@ VALID_OPTS = {
     # http://api.zeromq.org/3-2:zmq-setsockopt
     'pub_hwm': int,
 
+    # ZMQ HWM for SaltEvent pub socket
+    'salt_event_pub_hwm': int,
+    # ZMQ HWM for EventPublisher pub socket
+    'event_publisher_pub_hwm': int,
+
     # The number of MWorker processes for a master to startup. This number needs to scale up as
     # the number of connected minions increases.
     'worker_threads': int,
@@ -431,6 +440,10 @@ VALID_OPTS = {
     # A master-only copy of the file_roots dictionary, used by the state compiler
     'master_roots': dict,
 
+    # Add the proxymodule LazyLoader object to opts.  This breaks many things
+    # but this was the default pre 2015.8.2.  This should default to
+    # False in Boron
+    'add_proxymodule_to_opts': bool,
     'git_pillar_base': str,
     'git_pillar_branch': str,
     'git_pillar_env': str,
@@ -486,7 +499,7 @@ VALID_OPTS = {
 
     'pillar_safe_render_error': bool,
 
-    # When creating a pillar, there are several stratigies to choose from when
+    # When creating a pillar, there are several strategies to choose from when
     # encountering duplicate values
     'pillar_source_merging_strategy': str,
 
@@ -532,7 +545,8 @@ VALID_OPTS = {
     'autosign_timeout': int,
 
     # A mapping of external systems that can be used to generate topfile data.
-    'master_tops': bool,  # FIXME Should be dict?
+    # FIXME Should be dict?
+    'master_tops': bool,
 
     # A flag that should be set on a top-level master when it is ordering around subordinate masters
     # via the use of a salt syndic
@@ -882,6 +896,8 @@ DEFAULT_MINION_OPTS = {
     'recon_max': 10000,
     'recon_default': 1000,
     'recon_randomize': True,
+    'return_retry_timer': 4,
+    'return_retry_random': True,
     'syndic_log_file': os.path.join(salt.syspaths.LOGS_DIR, 'syndic'),
     'syndic_pidfile': os.path.join(salt.syspaths.PIDFILE_DIR, 'salt-syndic.pid'),
     'random_reauth_delay': 10,
@@ -941,12 +957,20 @@ DEFAULT_MINION_OPTS = {
     'sudo_user': '',
     'http_request_timeout': 1 * 60 * 60.0,  # 1 hour
     'http_max_body': 100 * 1024 * 1024 * 1024,  # 100GB
+    # ZMQ HWM for SaltEvent pub socket - different for minion vs. master
+    'salt_event_pub_hwm': 2000,
+    # ZMQ HWM for EventPublisher pub socket - different for minion vs. master
+    'event_publisher_pub_hwm': 1000,
 }
 
 DEFAULT_MASTER_OPTS = {
     'interface': '0.0.0.0',
     'publish_port': '4505',
     'pub_hwm': 1000,
+    # ZMQ HWM for SaltEvent pub socket - different for minion vs. master
+    'salt_event_pub_hwm': 2000,
+    # ZMQ HWM for EventPublisher pub socket - different for minion vs. master
+    'event_publisher_pub_hwm': 1000,
     'auth_mode': 1,
     'user': 'root',
     'worker_threads': 5,
@@ -1179,6 +1203,7 @@ DEFAULT_MASTER_OPTS = {
 DEFAULT_PROXY_MINION_OPTS = {
     'conf_file': os.path.join(salt.syspaths.CONFIG_DIR, 'proxy'),
     'log_file': os.path.join(salt.syspaths.LOGS_DIR, 'proxy'),
+    'add_proxymodule_to_opts': True
 }
 
 # ----- Salt Cloud Configuration Defaults ----------------------------------->
@@ -1216,10 +1241,12 @@ DEFAULT_API_OPTS = {
 
 DEFAULT_SPM_OPTS = {
     # ----- Salt master settings overridden by SPM --------------------->
+    'conf_file': os.path.join(salt.syspaths.CONFIG_DIR, 'spm'),
     'formula_path': '/srv/spm/salt',
     'pillar_path': '/srv/spm/pillar',
     'reactor_path': '/srv/spm/reactor',
     'spm_logfile': '/var/log/salt/spm',
+    'default_include': 'spm.d/*.conf',
     # spm_repos_config also includes a .d/ directory
     'spm_repos_config': '/etc/salt/spm.repos',
     'spm_cache_dir': os.path.join(salt.syspaths.CACHE_DIR, 'spm'),
@@ -1478,7 +1505,7 @@ def include_config(include, orig_path, verbose):
 
         for fn_ in sorted(glob.glob(path)):
             log.debug('Including configuration from \'{0}\''.format(fn_))
-            configuration.update(_read_conf_file(fn_))
+            salt.utils.dictupdate.update(configuration, _read_conf_file(fn_))
     return configuration
 
 
@@ -2551,8 +2578,8 @@ def is_profile_configured(opts, provider, profile_name):
     non_image_drivers = ['vmware']
 
     # Most drivers need a size, but some do not.
-    non_size_drivers = ['opennebula', 'parallels', 'scaleway', 'softlayer',
-                        'softlayer_hw', 'vmware', 'vsphere']
+    non_size_drivers = ['opennebula', 'parallels', 'proxmox', 'scaleway',
+                        'softlayer', 'softlayer_hw', 'vmware', 'vsphere']
 
     if driver not in non_image_drivers:
         required_keys.append('image')
@@ -2997,4 +3024,42 @@ def spm_config(path):
     # Let's override them with spm's required defaults
     defaults.update(DEFAULT_SPM_OPTS)
 
+    overrides = load_config(path, 'SPM_CONFIG', DEFAULT_SPM_OPTS['conf_file'])
+    default_include = overrides.get('default_include',
+                                    defaults['default_include'])
+    include = overrides.get('include', [])
+
+    overrides.update(include_config(default_include, path, verbose=False))
+    overrides.update(include_config(include, path, verbose=True))
+    defaults = apply_master_config(overrides, defaults)
+    defaults = apply_spm_config(overrides, defaults)
     return client_config(path, env_var='SPM_CONFIG', defaults=defaults)
+
+
+def apply_spm_config(overrides, defaults):
+    '''
+    Returns the spm configurations dict.
+
+    .. versionadded:: 2015.8.1
+    '''
+    opts = defaults.copy()
+    if overrides:
+        opts.update(overrides)
+
+    # Prepend root_dir to other paths
+    prepend_root_dirs = [
+        'formula_path', 'pillar_path', 'reactor_path',
+        'spm_cache_dir', 'spm_build_dir'
+    ]
+
+    # These can be set to syslog, so, not actual paths on the system
+    for config_key in ('spm_logfile',):
+        log_setting = opts.get(config_key, '')
+        if log_setting is None:
+            continue
+
+        if urlparse(log_setting).scheme == '':
+            prepend_root_dirs.append(config_key)
+
+    prepend_root_dir(opts, prepend_root_dirs)
+    return opts

@@ -33,10 +33,17 @@ import salt.fileclient
 import salt.utils.event
 import salt.utils.url
 import salt.syspaths as syspaths
-from salt.utils import context, immutabletypes
+from salt.utils import immutabletypes
 from salt.template import compile_template, compile_template_str
-from salt.exceptions import SaltRenderError, SaltReqTimeoutError, SaltException
+from salt.exceptions import (
+    SaltException,
+    SaltInvocationError,
+    SaltRenderError,
+    SaltReqTimeoutError
+)
 from salt.utils.odict import OrderedDict, DefaultOrderedDict
+# Explicit late import to avoid circular import. DO NOT MOVE THIS.
+import salt.utils.yamlloader as yamlloader
 
 # Import third party libs
 # pylint: disable=import-error,no-name-in-module,redefined-builtin
@@ -99,6 +106,8 @@ STATE_RUNTIME_KEYWORDS = frozenset([
     ])
 
 STATE_INTERNAL_KEYWORDS = STATE_REQUISITE_KEYWORDS.union(STATE_REQUISITE_IN_KEYWORDS).union(STATE_RUNTIME_KEYWORDS)
+
+VALID_PILLAR_ENC = ('gpg',)
 
 
 def _odict_hashable(self):
@@ -597,14 +606,26 @@ class State(object):
     '''
     Class used to execute salt states
     '''
-    def __init__(self, opts, pillar=None, jid=None):
+    def __init__(self, opts, pillar=None, jid=None, pillar_enc=None, proxy=None):
         if 'grains' not in opts:
             opts['grains'] = salt.loader.grains(opts)
         self.opts = opts
+        self.proxy = proxy
         self._pillar_override = pillar
+        if pillar_enc is not None:
+            try:
+                pillar_enc = pillar_enc.lower()
+            except AttributeError:
+                pillar_enc = str(pillar_enc).lower()
+            if pillar_enc not in VALID_PILLAR_ENC:
+                raise SaltInvocationError(
+                    'Invalid pillar encryption type. Valid types are: {0}'
+                    .format(', '.join(VALID_PILLAR_ENC))
+                )
+        self._pillar_enc = pillar_enc
         self.opts['pillar'] = self._gather_pillar()
         self.state_con = {}
-        self.load_modules()
+        self.load_modules(proxy=proxy)
         self.active = set()
         self.mod_init = set()
         self.pre = {}
@@ -612,6 +633,24 @@ class State(object):
         self.jid = jid
         self.instance_id = str(id(self))
         self.inject_globals = {}
+
+    def _decrypt_pillar_override(self):
+        '''
+        Decrypt CLI pillar overrides
+        '''
+        if not self._pillar_enc:
+            decrypt = None
+        else:
+            # Pillar data must be gathered before the modules are loaded, since
+            # it will be packed into each loaded function. Thus, we will not
+            # have access to the functions and must past an empty dict here.
+            decrypt = salt.loader.render(
+                self.opts,
+                {}).get(self._pillar_enc)
+        try:
+            return decrypt(self._pillar_override, translate_newlines=True)
+        except TypeError:
+            return self._pillar_override
 
     def _gather_pillar(self):
         '''
@@ -626,8 +665,20 @@ class State(object):
                 pillarenv=self.opts.get('pillarenv')
                 )
         ret = pillar.compile_pillar()
-        if self._pillar_override and isinstance(self._pillar_override, dict):
-            ret.update(self._pillar_override)
+        if self._pillar_override:
+            if isinstance(self._pillar_override, dict):
+                ret.update(self._decrypt_pillar_override())
+            else:
+                decrypted = yamlloader.load(
+                    self._decrypt_pillar_override(),
+                    Loader=yamlloader.SaltYamlSafeLoader
+                )
+                if not isinstance(decrypted, dict):
+                    log.error(
+                        'Decrypted pillar data did not render to a dictionary'
+                    )
+                else:
+                    ret.update(decrypted)
         return ret
 
     def _mod_init(self, low):
@@ -742,13 +793,15 @@ class State(object):
         '''
         self.__run_num = 0
 
-    def load_modules(self, data=None):
+    def load_modules(self, data=None, proxy=None):
         '''
         Load the modules into the state
         '''
         log.info('Loading fresh modules for state activity')
         self.utils = salt.loader.utils(self.opts)
-        self.functions = salt.loader.minion_mods(self.opts, self.state_con, utils=self.utils)
+        self.functions = salt.loader.minion_mods(self.opts, self.state_con,
+                                                 utils=self.utils,
+                                                 proxy=proxy)
         if isinstance(data, dict):
             if data.get('provider', False):
                 if isinstance(data['provider'], str):
@@ -785,7 +838,7 @@ class State(object):
                 reload(site)
             except RuntimeError:
                 log.error('Error encountered during module reload. Modules were not reloaded.')
-        self.load_modules()
+        self.load_modules(proxy=self.proxy)
         if not self.opts.get('local', False) and self.opts.get('multiprocessing', True):
             self.functions['saltutil.refresh_modules']()
 
@@ -1550,7 +1603,6 @@ class State(object):
             initial_ret={'full': state_func_name},
             expected_extra_kws=STATE_INTERNAL_KEYWORDS
         )
-
         inject_globals = {
             # Pass a copy of the running dictionary, the low state chunks and
             # the current state dictionaries.
@@ -1599,10 +1651,10 @@ class State(object):
                 inject_globals['__env__'] = 'base'
 
             if 'result' not in ret or ret['result'] is False:
-                with context.func_globals_inject(self.states[cdata['full']],
-                                                 **inject_globals):
-                    ret = self.states[cdata['full']](*cdata['args'],
-                                                     **cdata['kwargs'])
+                self.states.inject_globals = inject_globals
+                ret = self.states[cdata['full']](*cdata['args'],
+                                                 **cdata['kwargs'])
+                self.states.inject_globals = {}
             if 'check_cmd' in low and '{0[state]}.mod_run_check_cmd'.format(low) not in self.states:
                 ret.update(self._run_check_cmd(low))
             self.verify_ret(ret)
@@ -2556,7 +2608,11 @@ class BaseHighState(object):
         '''
         Returns the high data derived from the top file
         '''
-        tops = self.get_tops()
+        try:
+            tops = self.get_tops()
+        except SaltRenderError as err:
+            log.error('Unable to render top file: ' + str(err.error))
+            return {}
         return self.merge_tops(tops)
 
     def top_matches(self, top):
@@ -3072,7 +3128,7 @@ class BaseHighState(object):
             top = self.get_top()
         except SaltRenderError as err:
             ret[tag_name]['comment'] = 'Unable to render top file: '
-            ret[tag_name]['comment'] += err.error
+            ret[tag_name]['comment'] += str(err.error)
             return ret
         except Exception:
             trb = traceback.format_exc()
@@ -3081,7 +3137,7 @@ class BaseHighState(object):
         err += self.verify_tops(top)
         matches = self.top_matches(top)
         if not matches:
-            msg = ('No Top file or external nodes data matches found')
+            msg = 'No Top file or external nodes data matches found.'
             ret[tag_name]['comment'] = msg
             return ret
         matches = self.matches_whitelist(matches, whitelist)
@@ -3174,11 +3230,11 @@ class HighState(BaseHighState):
     # a stack of active HighState objects during a state.highstate run
     stack = []
 
-    def __init__(self, opts, pillar=None, jid=None):
+    def __init__(self, opts, pillar=None, jid=None, pillar_enc=None, proxy=None):
         self.opts = opts
         self.client = salt.fileclient.get_file_client(self.opts)
         BaseHighState.__init__(self, opts)
-        self.state = State(self.opts, pillar, jid)
+        self.state = State(self.opts, pillar, jid, pillar_enc, proxy=proxy)
         self.matcher = salt.minion.Matcher(self.opts)
 
         # tracks all pydsl state declarations globally across sls files
@@ -3218,7 +3274,7 @@ class MasterState(State):
     def __init__(self, opts, minion):
         State.__init__(self, opts)
 
-    def load_modules(self, data=None):
+    def load_modules(self, data=None, proxy=None):
         '''
         Load the modules into the state
         '''

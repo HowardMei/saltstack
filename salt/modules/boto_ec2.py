@@ -92,6 +92,260 @@ def __init__(opts):
         __utils__['boto.assign_funcs'](__name__, 'ec2')
 
 
+def _get_all_eip_addresses(addresses=None, allocation_ids=None, region=None,
+                           key=None, keyid=None, profile=None):
+    '''
+    Get all EIP's associated with the current credentials.
+
+    addresses
+        (list) - Optional list of addresses.  If provided, only those those in the
+        list will be returned.
+    allocation_ids
+        (list) - Optional list of allocation IDs.  If provided, only the
+        addresses associated with the given allocation IDs will be returned.
+
+    returns
+        (list) - The requested Addresses as a list of :class:`boto.ec2.address.Address`
+    '''
+    conn = _get_conn(region=region, key=key, keyid=keyid, profile=profile)
+
+    try:
+        return conn.get_all_addresses(addresses=addresses, allocation_ids=allocation_ids)
+    except boto.exception.BotoServerError as e:
+        log.error(e)
+        return []
+
+
+def get_all_eip_addresses(addresses=None, allocation_ids=None, region=None,
+                           key=None, keyid=None, profile=None):
+    '''
+    Get public addresses of some, or all EIPs associated with the current account.
+
+    addresses
+        (list) - Optional list of addresses.  If provided, only the addresses
+        associated with those in the list will be returned.
+    allocation_ids
+        (list) - Optional list of allocation IDs.  If provided, only the
+        addresses associated with the given allocation IDs will be returned.
+
+    returns
+        (list) - A list of the requested EIP addresses
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt-call boto_ec2.get_all_eip_addresses
+
+    .. versionadded:: Boron
+    '''
+    return [x.public_ip for x in _get_all_eip_addresses(addresses, allocation_ids, region,
+                key, keyid, profile)]
+
+
+def get_eip_address_info(addresses=None, allocation_ids=None, region=None, key=None,
+                         keyid=None, profile=None):
+    '''
+    Get 'interesting' info about some, or all EIPs associated with the current account.
+
+    addresses
+        (list) - Optional list of addresses.  If provided, only the addresses
+        associated with those in the list will be returned.
+    allocation_ids
+        (list) - Optional list of allocation IDs.  If provided, only the
+        addresses associated with the given allocation IDs will be returned.
+
+    returns
+        (list of dicts) - A list of dicts, each containing the info for one of the requested EIPs.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt-call boto_ec2.get_eip_address_info addresses=52.4.2.15
+
+    .. versionadded:: Boron
+    '''
+    if type(addresses) == (type('string')):
+        addresses = [addresses]
+    if type(allocation_ids) == (type('string')):
+        allocation_ids = [allocation_ids]
+
+    ret = _get_all_eip_addresses(addresses=addresses, allocation_ids=allocation_ids,
+                       region=region, key=key, keyid=keyid, profile=profile)
+
+    interesting = ['allocation_id', 'association_id', 'domain', 'instance_id',
+                   'network_interface_id', 'network_interface_owner_id', 'public_ip',
+                   'private_ip_address']
+
+    return [dict([(x, getattr(address, x)) for x in interesting]) for address in ret]
+
+
+def allocate_eip_address(domain=None, region=None, key=None, keyid=None, profile=None):
+    '''
+    Allocate a new Elastic IP address and associate it with your account.
+
+    domain
+        (string) Optional param - if set to exactly 'vpc', the address will be
+        allocated to the VPC.  The default simply maps the EIP to your
+        account container.
+
+    returns
+        (dict) dict of 'interesting' information about the newly allocated EIP,
+        with probably the most interesting keys being 'public_ip'; and
+        'allocation_id' iff 'domain=vpc' was passed.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt-call boto_ec2.allocate_eip_address domain=vpc
+
+    .. versionadded:: Boron
+    '''
+    if domain and domain != 'vpc':
+        raise SaltInvocationError('The only permitted value for the \'domain\' param is \'vpc\'.')
+
+    conn = _get_conn(region=region, key=key, keyid=keyid, profile=profile)
+
+    try:
+        address = conn.allocate_address(domain=domain)
+    except boto.exception.BotoServerError as e:
+        log.error(e)
+        return False
+
+    interesting = ['allocation_id', 'association_id', 'domain', 'instance_id',
+                   'network_interface_id', 'network_interface_owner_id', 'public_ip',
+                   'private_ip_address']
+
+    return dict([(x, getattr(address, x)) for x in interesting])
+
+
+def release_eip_address(public_ip=None, allocation_id=None, region=None, key=None,
+                        keyid=None, profile=None):
+    '''
+    Free an Elastic IP address.  Pass either a public IP address to release a 'standard'
+    EC2 Elastic IP address, or an AllocationId to release a VPC Elastic IP address.
+
+    public_ip
+        (string) - The public IP address - for EC2 elastic IPs.
+    allocation_id
+        (string) - The Allocation ID - for VPC elastic IPs.
+
+    returns
+        (bool) - True on success, False on failure
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt myminion boto_ec2.release_eip_address allocation_id=eipalloc-ef382c8a
+
+    .. versionadded:: Boron
+    '''
+    if not _exactly_one((public_ip, allocation_id)):
+        raise SaltInvocationError('Exactly one (but not both) of \'public_ip\' '
+                                  'or \'allocation_id\' must be provided')
+
+    conn = _get_conn(region=region, key=key, keyid=keyid, profile=profile)
+
+    try:
+        return conn.release_address(public_ip, allocation_id)
+    except boto.exception.BotoServerError as e:
+        log.error(e)
+        return False
+
+
+def associate_eip_address(instance_id=None, instance_name=None, public_ip=None,
+        allocation_id=None, network_interface_id=None, private_ip_address=None,
+        allow_reassociation=False, region=None, key=None, keyid=None, profile=None):
+    '''
+    Associate an Elastic IP address with a currently running instance.  This
+    requires exactly one of either 'public_ip' or 'allocation_id', depending
+    on whether you’re associating a VPC address or a plain EC2 address.
+
+    instance_id
+        (string) – ID of the instance to associate with (exclusive with 'instance_name')
+    instance_name
+        (string) – Name tag of the instance to associate with (exclusive with 'instance_id')
+    public_ip
+        (string) – Public IP address, for standard EC2 based allocations.
+    allocation_id
+        (string) – Allocation ID for a VPC-based EIP.
+    private_ip_address
+        (string) – The primary or secondary private IP address to associate with the Elastic IP address.
+    allow_reassociation
+        (bool)   – Allow a currently associated EIP to be re-associated with the new instance or interface.
+
+    returns
+        (bool)   - True on success, False otherwise
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt myminion boto_ec2.associate_eip_address instance_name=bubba.ho.tep allocation_id=eipalloc-ef382c8a
+
+    .. versionadded:: Boron
+    '''
+    if not _exactly_one((instance_id, instance_name)):
+        raise SaltInvocationError('Exactly one (but not both) of \'instance_id\' '
+                                  'or \'instance_name\' must be provided')
+
+    conn = _get_conn(region=region, key=key, keyid=keyid, profile=profile)
+
+    if instance_name:
+        try:
+            instance_id = get_id(name=instance_name, region=region, key=key, keyid=keyid, profile=profile)
+        except boto.exception.BotoServerError as e:
+            log.error(e)
+            return False
+
+    if not instance_id:
+        log.error("Given instance_name cannot be mapped to an instance_id")
+        return False
+
+    try:
+        return conn.associate_address(instance_id=instance_id, public_ip=public_ip,
+              allocation_id=allocation_id, network_interface_id=network_interface_id,
+              private_ip_address=private_ip_address, allow_reassociation=allow_reassociation)
+    except boto.exception.BotoServerError as e:
+        log.error(e)
+        return False
+
+
+def disassociate_eip_address(public_ip=None, association_id=None, region=None,
+                             key=None, keyid=None, profile=None):
+    '''
+    Disassociate an Elastic IP address from a currently running instance. This
+    requires exactly one of either 'association_id' or 'public_ip', depending
+    on whether you’re associating a VPC address or a plain EC2 address.
+
+    public_ip
+        (string) – Public IP address, for standard EC2 based allocations.
+    association_id
+        (string) – Association ID for a VPC-based EIP.
+
+    returns
+        (bool)   - True on success, False otherwise
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt myminion boto_ec2.disassociate_eip_address association_id=eipassoc-e3ba2d16
+
+    .. versionadded:: Boron
+    '''
+    conn = _get_conn(region=region, key=key, keyid=keyid, profile=profile)
+
+    try:
+        return conn.disassociate_address(public_ip, association_id)
+    except boto.exception.BotoServerError as e:
+        log.error(e)
+        return False
+
+
 def get_zones(region=None, key=None, keyid=None, profile=None):
     '''
     Get a list of AZs for the configured region.
@@ -108,7 +362,8 @@ def get_zones(region=None, key=None, keyid=None, profile=None):
 
 
 def find_instances(instance_id=None, name=None, tags=None, region=None,
-                   key=None, keyid=None, profile=None, return_objs=False):
+                   key=None, keyid=None, profile=None, return_objs=False,
+                   in_states=None):
 
     '''
     Given instance properties, find and return matching instance ids
@@ -124,6 +379,8 @@ def find_instances(instance_id=None, name=None, tags=None, region=None,
     '''
     conn = _get_conn(region=region, key=key, keyid=keyid, profile=profile)
 
+    if not any((instance_id, name, tags)):
+        return []
     try:
         filter_parameters = {'filters': {}}
 
@@ -142,10 +399,98 @@ def find_instances(instance_id=None, name=None, tags=None, region=None,
         log.debug('The filters criteria {0} matched the following '
                   'instances:{1}'.format(filter_parameters, instances))
 
+        if in_states:
+            instances = [i for i in instances if i.state in in_states]
+            log.debug('Limiting instance matches to those in the requested '
+                      'states: {0}'.format(instances))
         if instances:
             if return_objs:
                 return instances
             return [instance.id for instance in instances]
+        else:
+            return []
+    except boto.exception.BotoServerError as exc:
+        log.error(exc)
+        return []
+
+
+def create_image(ami_name, instance_id=None, instance_name=None, tags=None, region=None,
+                 key=None, keyid=None, profile=None, description=None, no_reboot=False,
+                 dry_run=False):
+    '''
+    Given instance properties that define exactly one instance, create AMI and return AMI-id.
+
+    CLI Examples:
+
+    .. code-block:: bash
+
+        salt myminion boto_ec2.create_instance ami_name instance_name=myinstance
+        salt myminion boto_ec2.create_instance another_ami_name tags='{"mytag": "value"}' description='this is my ami'
+
+    '''
+
+    instances = find_instances(instance_id=instance_id, name=instance_name, tags=tags,
+                               region=region, key=key, keyid=keyid, profile=profile,
+                               return_objs=True)
+
+    if not instances:
+        log.error('Source instance not found')
+        return False
+    if len(instances) > 1:
+        log.error('Multiple instances found, must match exactly only one instance to create an image from')
+        return False
+
+    instance = instances[0]
+    try:
+        return instance.create_image(ami_name, description=description,
+                                     no_reboot=no_reboot, dry_run=dry_run)
+    except boto.exception.BotoServerError as exc:
+        log.error(exc)
+        return False
+
+
+def find_images(ami_name=None, executable_by=None, owners=None, image_ids=None, tags=None,
+                region=None, key=None, keyid=None, profile=None, return_objs=False):
+
+    '''
+    Given image properties, find and return matching AMI ids
+
+    CLI Examples:
+
+    .. code-block:: bash
+
+        salt myminion boto_ec2.find_instances tags='{"mytag": "value"}'
+
+    '''
+    conn = _get_conn(region=region, key=key, keyid=keyid, profile=profile)
+
+    try:
+        filter_parameters = {'filters': {}}
+
+        if image_ids:
+            filter_parameters['image_ids'] = [image_ids]
+
+        if executable_by:
+            filter_parameters['executable_by'] = [executable_by]
+
+        if owners:
+            filter_parameters['owners'] = [owners]
+
+        if ami_name:
+            filter_parameters['filters']['name'] = ami_name
+
+        if tags:
+            for tag_name, tag_value in six.iteritems(tags):
+                filter_parameters['filters']['tag:{0}'.format(tag_name)] = tag_value
+
+        images = conn.get_all_images(**filter_parameters)
+        log.debug('The filters criteria {0} matched the following '
+                  'images:{1}'.format(filter_parameters, images))
+
+        if images:
+            if return_objs:
+                return images
+            return [image.id for image in images]
         else:
             return False
     except boto.exception.BotoServerError as exc:
@@ -168,19 +513,19 @@ def terminate(instance_id=None, name=None, region=None,
     instances = find_instances(instance_id=instance_id, name=name,
                                region=region, key=key, keyid=keyid,
                                profile=profile, return_objs=True)
-    if instances in (False, None):
+    if instances in (False, None, []):
         return instances
 
     if len(instances) == 1:
         instances[0].terminate()
         return True
     else:
-        log.warning('refusing to terminate multiple instances at once')
+        log.warning('Refusing to terminate multiple instances at once')
         return False
 
 
 def get_id(name=None, tags=None, region=None, key=None,
-           keyid=None, profile=None):
+           keyid=None, profile=None, in_states=None):
 
     '''
     Given instace properties, return the instance id if it exist.
@@ -193,7 +538,7 @@ def get_id(name=None, tags=None, region=None, key=None,
 
     '''
     instance_ids = find_instances(name=name, tags=tags, region=region, key=key,
-                                  keyid=keyid, profile=profile)
+                                  keyid=keyid, profile=profile, in_states=in_states)
     if instance_ids:
         log.info("Instance ids: {0}".format(" ".join(instance_ids)))
         if len(instance_ids) == 1:
@@ -207,7 +552,7 @@ def get_id(name=None, tags=None, region=None, key=None,
 
 
 def exists(instance_id=None, name=None, tags=None, region=None, key=None,
-           keyid=None, profile=None):
+           keyid=None, profile=None, in_states=None):
     '''
     Given a instance id, check to see if the given instance id exists.
 
@@ -220,18 +565,27 @@ def exists(instance_id=None, name=None, tags=None, region=None, key=None,
 
         salt myminion boto_ec2.exists myinstance
     '''
-    instances = find_instances(instance_id=instance_id, name=name, tags=tags)
+    instances = find_instances(instance_id=instance_id, name=name, tags=tags,
+                               in_states=in_states)
     if instances:
-        log.info('instance exists.')
+        log.info('Instance exists.')
         return True
     else:
-        log.warning('instance does not exist.')
+        log.warning('Instance does not exist.')
         return False
 
 
-def run(image_id, name=None, tags=None, instance_type='m1.small',
-        key_name=None, security_groups=None, user_data=None, placement=None,
+def run(image_id, name=None, tags=None, key_name=None, security_groups=None,
+        user_data=None, instance_type='m1.small', placement=None,
+        kernel_id=None, ramdisk_id=None, monitoring_enabled=None, vpc_id=None,
+        vpc_name=None, subnet_id=None, subnet_name=None, private_ip_address=None,
+        block_device_map=None, disable_api_termination=None,
+        instance_initiated_shutdown_behavior=None, placement_group=None,
+        client_token=None, security_group_ids=None, security_group_names=None,
+        additional_info=None, tenancy=None, instance_profile_arn=None,
+        instance_profile_name=None, ebs_optimized=None, network_interfaces=None,
         region=None, key=None, keyid=None, profile=None):
+    #TODO: support multi-instance reservations
     '''
     Create and start an EC2 instance.
 
@@ -243,18 +597,131 @@ def run(image_id, name=None, tags=None, instance_type='m1.small',
 
         salt myminion boto_ec2.run ami-b80c2b87 name=myinstance
 
+    image_id
+        (string) – The ID of the image to run.
+    name
+        (string) - The name of the instance.
+    tags
+        (dict of key: value pairs) - tags to apply to the instance.
+    key_name
+        (string) – The name of the key pair with which to launch instances.
+    security_groups
+        (list of strings) – The names of the EC2 classic security groups with
+        which to associate instances
+    user_data
+        (string) – The Base64-encoded MIME user data to be made available to the
+        instance(s) in this reservation.
+    instance_type
+        (string) – The type of instance to run.  Note that some image types
+        (e.g. hvm) only run on some instance types.
+    placement
+        (string) – The Availability Zone to launch the instance into.
+    kernel_id
+        (string) – The ID of the kernel with which to launch the instances.
+    ramdisk_id
+        (string) – The ID of the RAM disk with which to launch the instances.
+    monitoring_enabled
+        (bool) – Enable detailed CloudWatch monitoring on the instance.
+    vpc_id
+        (string) - ID of a VPC to bind the instance to.  Exclusive with vpc_name.
+    vpc_name
+        (string) - Name of a VPC to bind the instance to.  Exclusive with vpc_id.
+    subnet_id
+        (string) – The subnet ID within which to launch the instances for VPC.
+    subnet_name
+        (string) – The name of a subnet within which to launch the instances for VPC.
+    private_ip_address
+        (string) – If you’re using VPC, you can optionally use this parameter to
+        assign the instance a specific available IP address from the subnet
+        (e.g. 10.0.0.25).
+    block_device_map
+        (boto.ec2.blockdevicemapping.BlockDeviceMapping) – A BlockDeviceMapping
+        data structure describing the EBS volumes associated with the Image.
+    disable_api_termination
+        (bool) – If True, the instances will be locked and will not be able to
+        be terminated via the API.
+    instance_initiated_shutdown_behavior
+        (string) – Specifies whether the instance stops or terminates on
+        instance-initiated shutdown. Valid values are: stop, terminate
+    placement_group
+        (string) – If specified, this is the name of the placement group in
+        which the instance(s) will be launched.
+    client_token
+        (string) – Unique, case-sensitive identifier you provide to ensure
+        idempotency of the request. Maximum 64 ASCII characters.
+    security_group_ids
+        (list of strings) – The ID(s) of the VPC security groups with which to
+        associate instances.
+    security_group_names
+        (list of strings) – The name(s) of the VPC security groups with which to
+        associate instances.
+    additional_info
+        (string) – Specifies additional information to make available to the
+        instance(s).
+    tenancy
+        (string) – The tenancy of the instance you want to launch. An instance
+        with a tenancy of ‘dedicated’ runs on single-tenant hardware and can
+        only be launched into a VPC. Valid values are:”default” or “dedicated”.
+        NOTE: To use dedicated tenancy you MUST specify a VPC subnet-ID as well.
+    instance_profile_arn
+        (string) – The Amazon resource name (ARN) of the IAM Instance Profile
+        (IIP) to associate with the instances.
+    instance_profile_name
+        (string) – The name of the IAM Instance Profile (IIP) to associate with
+        the instances.
+    ebs_optimized
+        (bool) – Whether the instance is optimized for EBS I/O. This
+        optimization provides dedicated throughput to Amazon EBS and an
+        optimized configuration stack to provide optimal EBS I/O performance.
+        This optimization isn’t available with all instance types.
+    network_interfaces
+        (boto.ec2.networkinterface.NetworkInterfaceCollection) – A
+        NetworkInterfaceCollection data structure containing the ENI
+        specifications for the instance.
+
     '''
-    #TODO: support multi-instance reservations
+    if all((subnet_id, subnet_name)):
+        raise SaltInvocationError('Only one of subnet_name or subnet_id may be '
+                                  'provided.')
+    if subnet_name:
+        r = __salt__['boto_vpc.get_resource_id']('subnet', subnet_name,
+                                                 region=region, key=key,
+                                                 keyid=keyid, profile=profile)
+        if 'id' not in r:
+            log.warning('Couldn\'t resolve subnet name {0}.').format(subnet_name)
+            return False
+        subnet_id = r['id']
+
+    if all((security_group_ids, security_group_names)):
+        raise SaltInvocationError('Only one of security_group_ids or '
+                                  'security_group_names may be provided.')
+    if security_group_names:
+        security_group_ids = []
+        for sgn in security_group_names:
+            r = __salt__['boto_secgroup.get_group_id'](sgn, vpc_name=vpc_name,
+                                                       region=region, key=key,
+                                                       keyid=keyid, profile=profile)
+            if not r:
+                log.warning('Couldn\'t resolve security group name ' + str(sgn))
+                return False
+            security_group_ids += [r]
 
     conn = _get_conn(region=region, key=key, keyid=keyid, profile=profile)
 
-    reservation = conn.run_instances(image_id, instance_type=instance_type,
-                                     key_name=key_name,
-                                     security_groups=security_groups,
-                                     user_data=user_data,
-                                     placement=placement)
+    reservation = conn.run_instances(image_id, key_name=key_name, security_groups=security_groups,
+                                     user_data=user_data, instance_type=instance_type,
+                                     placement=placement, kernel_id=kernel_id, ramdisk_id=ramdisk_id,
+                                     monitoring_enabled=monitoring_enabled, subnet_id=subnet_id,
+                                     private_ip_address=private_ip_address, block_device_map=block_device_map,
+                                     disable_api_termination=disable_api_termination,
+                                     instance_initiated_shutdown_behavior=instance_initiated_shutdown_behavior,
+                                     placement_group=placement_group, client_token=client_token,
+                                     security_group_ids=security_group_ids, additional_info=additional_info,
+                                     tenancy=tenancy, instance_profile_arn=instance_profile_arn,
+                                     instance_profile_name=instance_profile_name, ebs_optimized=ebs_optimized,
+                                     network_interfaces=network_interfaces)
     if not reservation:
-        log.warning('instances could not be reserved')
+        log.warning('Instance could not be reserved')
         return False
 
     instance = reservation.instances[0]
@@ -268,9 +735,9 @@ def run(image_id, name=None, tags=None, instance_type='m1.small',
             instance.add_tag('Name', name)
         if tags:
             instance.add_tags(tags)
-        return True
+        return {'instance_id': instance.id}
     else:
-        log.warning('instance could not be started -- '
+        log.warning('Instance could not be started -- '
                     'status is "{0}"'.format(status))
 
 
@@ -403,7 +870,8 @@ def get_keys(keynames=None, filters=None, region=None, key=None,
         return False
 
 
-def get_attribute(attribute, instance_name=None, instance_id=None, region=None, key=None, keyid=None, profile=None):
+def get_attribute(attribute, instance_name=None, instance_id=None, region=None, key=None,
+                  keyid=None, profile=None):
     '''
     Get an EC2 instance attribute.
 
@@ -434,7 +902,8 @@ def get_attribute(attribute, instance_name=None, instance_id=None, region=None, 
                       'instanceInitiatedShutdownBehavior', 'rootDeviceName', 'blockDeviceMapping', 'productCodes',
                       'sourceDestCheck', 'groupSet', 'ebsOptimized', 'sriovNetSupport']
     if not any((instance_name, instance_id)):
-        raise SaltInvocationError('At least one of the following must be specified: instance_name or instance_id.')
+        raise SaltInvocationError('At least one of the following must be specified: '
+                                  'instance_name or instance_id.')
     if instance_name and instance_id:
         raise SaltInvocationError('Both instance_name and instance_id can not be specified in the same command.')
     if attribute not in attribute_list:
@@ -442,8 +911,12 @@ def get_attribute(attribute, instance_name=None, instance_id=None, region=None, 
     try:
         if instance_name:
             instances = find_instances(name=instance_name, region=region, key=key, keyid=keyid, profile=profile)
-            if len(instances) != 1:
-                raise CommandExecutionError('Found more than one EC2 instance matching the criteria.')
+            if len(instances) > 1:
+                log.error('Found more than one EC2 instance matching the criteria.')
+                return False
+            elif len(instances) < 1:
+                log.error('Found no EC2 instance matching the criteria.')
+                return False
             instance_id = instances[0]
         instance_attribute = conn.get_instance_attribute(instance_id, attribute)
         if not instance_attribute:
@@ -525,16 +998,15 @@ def get_network_interface_id(name, region=None, key=None, keyid=None,
     r = {}
     try:
         enis = conn.get_all_network_interfaces(filters={'tag:Name': name})
+        if not enis:
+            r['error'] = {'message': 'No ENIs found.'}
+        elif len(enis) > 1:
+            r['error'] = {'message': 'Name specified is tagged on multiple ENIs.'}
+        else:
+            eni = enis[0]
+            r['result'] = eni.id
     except boto.exception.EC2ResponseError as e:
         r['error'] = __utils__['boto.get_error'](e)
-    if not enis:
-        r['error'] = {'message': 'No ENIs found.'}
-    elif len(enis) > 1:
-        r['error'] = {'message': 'Name specified is tagged on multiple ENIs.'}
-    if 'error' in r:
-        return r
-    eni = enis[0]
-    r['result'] = eni.id
     return r
 
 
@@ -575,16 +1047,16 @@ def _get_network_interface(conn, name=None, network_interface_id=None):
             enis = conn.get_all_network_interfaces([network_interface_id])
         else:
             enis = conn.get_all_network_interfaces(filters={'tag:Name': name})
+
+        if not enis:
+            r['error'] = {'message': 'No ENIs found.'}
+        elif len(enis) > 1:
+            r['error'] = {'message': 'Name specified is tagged on multiple ENIs.'}
+        else:
+            eni = enis[0]
+            r['result'] = eni
     except boto.exception.EC2ResponseError as e:
         r['error'] = __utils__['boto.get_error'](e)
-    if not enis:
-        r['error'] = {'message': 'No ENIs found.'}
-    elif len(enis) > 1:
-        r['error'] = {'message': 'Name specified is tagged on multiple ENIs.'}
-    if 'error' in r:
-        return r
-    eni = enis[0]
-    r['result'] = eni
     return r
 
 
@@ -639,6 +1111,7 @@ def create_network_interface(
     vpc_id = __salt__['boto_vpc.get_subnet_association'](
         [subnet_id], region=region, key=key, keyid=keyid, profile=profile
     )
+    vpc_id = vpc_id.get('vpc_id')
     if not vpc_id:
         msg = 'subnet_id {0} does not map to a valid vpc id.'.format(subnet_id)
         r['error'] = {'message': msg}

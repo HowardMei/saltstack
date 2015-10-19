@@ -1537,20 +1537,7 @@ def is_windows():
     '''
     Simple function to return if a host is Windows or not
     '''
-    import __main__ as main
-    # This is a hack.  If a proxy minion is started by other
-    # means, e.g. a custom script that creates the minion objects
-    # then this will fail.
-    is_proxy = False
-    try:
-        if 'salt-proxy' in main.__file__:
-            is_proxy = True
-    except AttributeError:
-        pass
-    if is_proxy:
-        return False
-    else:
-        return sys.platform.startswith('win')
+    return sys.platform.startswith('win')
 
 
 def sanitize_win_path_string(winpath):
@@ -1576,15 +1563,6 @@ def is_proxy():
     TODO: Need to extend this for proxies that might run on
     other Unices
     '''
-    return not (is_linux() or is_windows())
-
-
-@real_memoize
-def is_linux():
-    '''
-    Simple function to return if a host is Linux or not.
-    Note for a proxy minion, we need to return something else
-    '''
     import __main__ as main
     # This is a hack.  If a proxy minion is started by other
     # means, e.g. a custom script that creates the minion objects
@@ -1595,10 +1573,16 @@ def is_linux():
             is_proxy = True
     except AttributeError:
         pass
-    if is_proxy:
-        return False
-    else:
-        return sys.platform.startswith('linux')
+    return is_proxy
+
+
+@real_memoize
+def is_linux():
+    '''
+    Simple function to return if a host is Linux or not.
+    Note for a proxy minion, we need to return something else
+    '''
+    return sys.platform.startswith('linux')
 
 
 @real_memoize
@@ -2867,24 +2851,3 @@ def invalid_kwargs(invalid_kwargs, raise_exc=True):
         raise SaltInvocationError(msg)
     else:
         return msg
-
-
-def itersplit(orig, sep=None):
-    '''
-    Generator function for iterating through large strings, particularly useful
-    as a replacement for str.splitlines() if the string is expected to contain
-    a lot of lines.
-
-    See http://stackoverflow.com/a/3865367
-    '''
-    exp = re.compile(r'\s+' if sep is None else re.escape(sep))
-    pos = 0
-    while True:
-        match = exp.search(orig, pos)
-        if not match:
-            if pos < len(orig) or sep is not None:
-                yield orig[pos:]
-            break
-        if pos < match.start() or sep is not None:
-            yield orig[pos:match.start()]
-        pos = match.end()

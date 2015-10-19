@@ -114,13 +114,25 @@ def install_file(package, formula_tar, member, formula_def, conn=None):
 
 def remove_file(path, conn=None):
     '''
-    Install a single file to the file system
+    Remove a single file from the file system
     '''
     if conn is None:
         conn = init()
 
     log.debug('Removing package file {0}'.format(path))
     os.remove(path)
+
+
+def hash_file(path, hashobj, conn=None):
+    '''
+    Get the hexdigest hash value of a file
+    '''
+    if os.path.isdir(path):
+        return ''
+
+    with salt.utils.fopen(path, 'r') as f:
+        hashobj.update(f.read())
+        return hashobj.hexdigest()
 
 
 def path_exists(path):

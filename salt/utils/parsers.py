@@ -137,12 +137,11 @@ class OptionParser(optparse.OptionParser, object):
         if self.epilog:
             kwargs.setdefault('epilog', self.epilog)
 
+        kwargs.setdefault('option_class', CustomOption)
         optparse.OptionParser.__init__(self, *args, **kwargs)
 
         if self.epilog and '%prog' in self.epilog:
             self.epilog = self.epilog.replace('%prog', self.get_prog_name())
-
-    option_class = CustomOption
 
     def add_option_group(self, *args, **kwargs):
         option_group = optparse.OptionParser.add_option_group(self, *args, **kwargs)
@@ -843,6 +842,10 @@ class DaemonMixIn(six.with_metaclass(MixInMeta, object)):
             import salt.utils
             salt.utils.daemonize()
 
+    def is_daemonized(self, pid):
+        import salt.utils.process
+        return salt.utils.process.os_is_running(pid)
+
 
 class PidfileMixin(six.with_metaclass(MixInMeta, object)):
     _mixin_prio_ = 40
@@ -859,6 +862,20 @@ class PidfileMixin(six.with_metaclass(MixInMeta, object)):
     def set_pidfile(self):
         from salt.utils.process import set_pidfile
         set_pidfile(self.config['pidfile'], self.config['user'])
+
+    def check_pidfile(self):
+        '''
+        Report whether a pidfile exists
+        '''
+        from salt.utils.process import check_pidfile
+        return check_pidfile(self.config['pidfile'])
+
+    def get_pidfile(self):
+        '''
+        Return a pid contained in a pidfile
+        '''
+        from salt.utils.process import get_pidfile
+        return get_pidfile(self.config['pidfile'])
 
 
 class TargetOptionsMixIn(six.with_metaclass(MixInMeta, object)):
@@ -980,6 +997,7 @@ class ExtendedTargetOptionsMixIn(TargetOptionsMixIn):
         group.add_option(
             '-I', '--pillar',
             default=False,
+            dest='pillar_target',
             action='store_true',
             help=('Instead of using shell globs to evaluate the target '
                   'use a pillar value to identify targets, the syntax '
@@ -1003,6 +1021,10 @@ class ExtendedTargetOptionsMixIn(TargetOptionsMixIn):
         )
 
         self._create_process_functions()
+
+    def process_pillar_target(self):
+        if self.options.pillar_target:
+            self.selected_target_option = 'pillar'
 
 
 class TimeoutMixIn(six.with_metaclass(MixInMeta, object)):
@@ -1118,6 +1140,13 @@ class OutputOptionsMixIn(six.with_metaclass(MixInMeta, object)):
                   'output. One of full, terse, mixed, changes or filter. '
                   'Default: full.')
         )
+        group.add_option(
+            '--state-verbose', '--state_verbose',
+            default=True,
+            help=('Override the configured state_verbose value for minion '
+                  'output. Set to True or False'
+                  'Default: True')
+        )
 
         for option in self.output_options_group.option_list:
             def process(opt):
@@ -1148,6 +1177,12 @@ class OutputOptionsMixIn(six.with_metaclass(MixInMeta, object)):
                             exc
                         )
                     )
+
+    def process_state_verbose(self):
+        if self.options.state_verbose == "True" or self.options.state_verbose == "true":
+            self.options.state_verbose = True
+        elif self.options.state_verbose == "False" or self.options.state_verbose == "false":
+            self.options.state_verbose = False
 
     def _mixin_after_parsed(self):
         group_options_selected = [
@@ -1266,6 +1301,13 @@ class ExecutionOptionsMixIn(six.with_metaclass(MixInMeta, object)):
             default=None,
             help='Script arguments to be fed to the bootstrap script when '
                  'deploying the VM'
+        )
+        group.add_option(
+            '-b', '--bootstrap',
+            nargs=1,
+            default=False,
+            metavar='<HOST> [MINION_ID] [OPTIONS...]',
+            help='Bootstrap an existing machine.'
         )
         self.add_option_group(group)
 
@@ -1509,6 +1551,14 @@ class MasterOptionParser(six.with_metaclass(OptionParserMeta,
     def setup_config(self):
         return config.master_config(self.get_config_file_path())
 
+    def check_running(self):
+        '''
+        Check if a pid file exists and if it is associated with
+        a running process.
+        '''
+        if self.check_pidfile():
+            return self.is_daemonized(self.get_pidfile())
+
 
 class MinionOptionParser(six.with_metaclass(OptionParserMeta, MasterOptionParser)):  # pylint: disable=no-init
 
@@ -1703,6 +1753,20 @@ class SaltCMDOptionParser(six.with_metaclass(OptionParserMeta,
                   'send the return data from the command back to the master, '
                   'but the return data can be redirected into any number of '
                   'systems, databases or applications.')
+        )
+        self.add_option(
+            '--return_kwargs',
+            default={},
+            metavar='RETURNER_KWARGS',
+            help=('Set any returner options at the command line.')
+        )
+        self.add_option(
+            '--module-executors',
+            dest='module_executors',
+            default=None,
+            metavar='EXECUTOR_LIST',
+            help=('Set an alternative list of executors to override the one '
+                  'set in minion config')
         )
         self.add_option(
             '-d', '--doc', '--documentation',
@@ -2237,6 +2301,11 @@ class SaltCallOptionParser(six.with_metaclass(OptionParserMeta,
             '--pillar-root',
             default=None,
             help='Set this directory as the base pillar root.'
+        )
+        self.add_option(
+            '--states-dir',
+            default=None,
+            help='Set this directory to search for additional states'
         )
         self.add_option(
             '--retcode-passthrough',

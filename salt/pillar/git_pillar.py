@@ -176,6 +176,7 @@ import os
 
 # Import salt libs
 import salt.utils.gitfs
+import salt.utils.dictupdate
 from salt.exceptions import FileserverConfigError
 from salt.pillar import Pillar
 
@@ -189,7 +190,7 @@ except ImportError:
     HAS_GITPYTHON = False
 # pylint: enable=import-error
 
-PER_REMOTE_PARAMS = ('env', 'root', 'ssl_verify')
+PER_REMOTE_OVERRIDES = ('env', 'root', 'ssl_verify')
 
 # Set up logging
 log = logging.getLogger(__name__)
@@ -242,13 +243,21 @@ def ext_pillar(minion_id, repo, pillar_dirs):
         opts = copy.deepcopy(__opts__)
         opts['pillar_roots'] = {}
         pillar = salt.utils.gitfs.GitPillar(opts)
-        pillar.init_remotes(repo, PER_REMOTE_PARAMS)
+        pillar.init_remotes(repo, PER_REMOTE_OVERRIDES)
         pillar.checkout()
         ret = {}
+        merge_strategy = __opts__.get(
+            'pillar_source_merging_strategy',
+            'smart'
+        )
         for pillar_dir, env in six.iteritems(pillar.pillar_dirs):
             opts['pillar_roots'] = {env: [pillar_dir]}
             local_pillar = Pillar(opts, __grains__, minion_id, env)
-            ret.update(local_pillar.compile_pillar(ext=False))
+            ret = salt.utils.dictupdate.merge(
+                ret,
+                local_pillar.compile_pillar(ext=False),
+                strategy=merge_strategy
+            )
         return ret
 
 
@@ -316,6 +325,8 @@ class _LegacyGitPillar(object):
             branch = opts.get('environment') or 'base'
             if branch == 'base':
                 branch = opts.get('gitfs_base') or 'master'
+        elif ':' in branch:
+            branch = branch.split(':', 1)[0]
         return branch
 
     def update(self):
