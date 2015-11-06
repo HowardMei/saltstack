@@ -259,13 +259,13 @@ import os
 import time
 import datetime
 import itertools
-import multiprocessing
 import threading
 import logging
 import errno
 import random
 
 # Import Salt libs
+import salt.config
 import salt.utils
 import salt.utils.jid
 import salt.utils.process
@@ -276,7 +276,7 @@ import salt.payload
 import salt.syspaths
 import salt.exceptions
 from salt.utils.odict import OrderedDict
-from salt.utils.process import os_is_running
+from salt.utils.process import os_is_running, MultiprocessingProcess
 
 # Import 3rd-party libs
 import yaml
@@ -334,16 +334,28 @@ class Schedule(object):
         '''
         Persist the modified schedule into <<configdir>>/minion.d/_schedule.conf
         '''
-        schedule_conf = os.path.join(
-                salt.syspaths.CONFIG_DIR,
-                'minion.d',
-                '_schedule.conf')
+        config_dir = self.opts.get('conf_dir', None)
+        if config_dir is None and 'conf_file' in self.opts:
+            config_dir = os.path.dirname(self.opts['conf_file'])
+        if config_dir is None:
+            config_dir = salt.syspaths.CONFIG_DIR
+
+        minion_d_dir = os.path.join(
+            config_dir,
+            os.path.dirname(self.opts.get('default_include',
+                                          salt.config.DEFAULT_MINION_OPTS['default_include'])))
+
+        if not os.path.isdir(minion_d_dir):
+            os.makedirs(minion_d_dir)
+
+        schedule_conf = os.path.join(minion_d_dir, '_schedule.conf')
         log.debug('Persisting schedule')
         try:
             with salt.utils.fopen(schedule_conf, 'wb+') as fp_:
                 fp_.write(yaml.dump({'schedule': self.opts['schedule']}))
         except (IOError, OSError):
-            log.error('Failed to persist the updated schedule')
+            log.error('Failed to persist the updated schedule',
+                      exc_info_on_loglevel=logging.DEBUG)
 
     def delete_job(self, name, persist=True, where=None):
         '''
@@ -500,7 +512,7 @@ class Schedule(object):
                 'Running Job: {0}.'.format(name)
             )
             if self.opts.get('multiprocessing', True):
-                thread_cls = multiprocessing.Process
+                thread_cls = MultiprocessingProcess
             else:
                 thread_cls = threading.Thread
             proc = thread_cls(target=self.handle_func, args=(func, data))
@@ -1140,7 +1152,7 @@ class Schedule(object):
                 self.returners = {}
             try:
                 if self.opts.get('multiprocessing', True):
-                    thread_cls = multiprocessing.Process
+                    thread_cls = MultiprocessingProcess
                 else:
                     thread_cls = threading.Thread
                 proc = thread_cls(target=self.handle_func, args=(func, data))

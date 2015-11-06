@@ -15,6 +15,7 @@ import fnmatch
 import logging
 import threading
 import traceback
+import contextlib
 import multiprocessing
 from random import randint, shuffle
 from salt.config import DEFAULT_MINION_OPTS
@@ -80,6 +81,7 @@ import salt.beacons
 import salt.payload
 import salt.syspaths
 import salt.utils
+import salt.utils.context
 import salt.utils.jid
 import salt.pillar
 import salt.utils.args
@@ -101,7 +103,8 @@ from salt.exceptions import (
     SaltInvocationError,
     SaltReqTimeoutError,
     SaltClientError,
-    SaltSystemExit
+    SaltSystemExit,
+    SaltDaemonNotRunning
 )
 
 
@@ -713,15 +716,22 @@ class Minion(MinionBase):
         if not salt.utils.is_proxy():
             self.opts['grains'] = salt.loader.grains(opts)
 
-    # TODO: remove?
-    def sync_connect_master(self):
+    def sync_connect_master(self, timeout=None):
         '''
         Block until we are connected to a master
         '''
+        self._sync_connect_master_success = False
         log.debug("sync_connect_master")
+
+        def on_connect_master_future_done(future):
+            self._sync_connect_master_success = True
+            self.io_loop.stop()
+
         self._connect_master_future = self.connect_master()
         # finish connecting to master
-        self._connect_master_future.add_done_callback(lambda f: self.io_loop.stop())
+        self._connect_master_future.add_done_callback(on_connect_master_future_done)
+        if timeout:
+            self.io_loop.call_later(timeout, self.io_loop.stop)
         self.io_loop.start()
         # I made the following 3 line oddity to preserve traceback.
         # Please read PR #23978 before changing, hopefully avoiding regressions.
@@ -729,6 +739,8 @@ class Minion(MinionBase):
         future_exception = self._connect_master_future.exc_info()
         if future_exception:
             raise six.reraise(*future_exception)
+        if timeout and self._sync_connect_master_success is False:
+            raise SaltDaemonNotRunning('Failed to connect to the salt-master')
 
     @tornado.gen.coroutine
     def connect_master(self):
@@ -770,17 +782,20 @@ class Minion(MinionBase):
             self.returners)
 
         # add default scheduling jobs to the minions scheduler
-        if 'mine.update' in self.functions:
-            log.info('Added mine.update to scheduler')
+        if self.opts['mine_enabled'] and 'mine.update' in self.functions:
             self.schedule.add_job({
                 '__mine_interval':
                 {
                     'function': 'mine.update',
                     'minutes': self.opts['mine_interval'],
                     'jid_include': True,
-                    'maxrunning': 2
+                    'maxrunning': 2,
+                    'return_job': self.opts.get('mine_return_job', False)
                 }
             }, persist=True)
+            log.info('Added mine.update to scheduler')
+        else:
+            self.schedule.delete_job('__mine_interval', persist=True)
 
         # add master_alive job if enabled
         if self.opts['master_alive_interval'] > 0:
@@ -950,10 +965,6 @@ class Minion(MinionBase):
                 self.functions, self.returners, self.function_errors, self.executors = self._load_modules()
                 self.schedule.functions = self.functions
                 self.schedule.returners = self.returners
-        if isinstance(data['fun'], tuple) or isinstance(data['fun'], list):
-            target = Minion._thread_multi_return
-        else:
-            target = Minion._thread_return
         # We stash an instance references to allow for the socket
         # communication in Windows. You can't pickle functions, and thus
         # python needs to be able to reconstruct the reference on the other
@@ -965,19 +976,38 @@ class Minion(MinionBase):
                 # running on windows
                 instance = None
             process = multiprocessing.Process(
-                target=target, args=(instance, self.opts, data)
+                target=self._target, args=(instance, self.opts, data)
             )
         else:
             process = threading.Thread(
-                target=target,
+                target=self._target,
                 args=(instance, self.opts, data),
                 name=data['jid']
             )
         process.start()
-        if not sys.platform.startswith('win'):
+        # TODO: remove the windows specific check?
+        if not sys.platform.startswith('win') and self.opts['multiprocessing']:
+            # we only want to join() immediately if we are daemonizing a process
             process.join()
         else:
             self.win_proc.append(process)
+
+    def ctx(self):
+        '''Return a single context manager for the minion's data
+        '''
+        return contextlib.nested(
+            self.functions.context_dict.clone(),
+            self.returners.context_dict.clone(),
+            self.executors.context_dict.clone(),
+        )
+
+    @classmethod
+    def _target(cls, minion_instance, opts, data):
+        with tornado.stack_context.StackContext(minion_instance.ctx):
+            if isinstance(data['fun'], tuple) or isinstance(data['fun'], list):
+                Minion._thread_multi_return(minion_instance, opts, data)
+            else:
+                Minion._thread_return(minion_instance, opts, data)
 
     @classmethod
     def _thread_return(cls, minion_instance, opts, data):
@@ -1176,6 +1206,13 @@ class Minion(MinionBase):
         salt.utils.appendproctitle(data['jid'])
         # this seems awkward at first, but it's a workaround for Windows
         # multiprocessing communication.
+        if sys.platform.startswith('win') and \
+                opts['multiprocessing'] and \
+                not salt.log.is_logging_configured():
+            # We have to re-init the logging system for Windows
+            salt.log.setup_console_logger(log_level=opts.get('log_level', 'info'))
+            if opts.get('log_file'):
+                salt.log.setup_logfile_logger(opts['log_file'], opts.get('log_level_logfile', 'info'))
         if not minion_instance:
             minion_instance = cls(opts)
         ret = {
@@ -1649,7 +1686,9 @@ class Minion(MinionBase):
         self._pre_tune()
 
         # Properly exit if a SIGTERM is signalled
-        signal.signal(signal.SIGTERM, self.clean_die)
+        if signal.getsignal(signal.SIGTERM) is signal.SIG_DFL:
+            # No SIGTERM installed, install ours
+            signal.signal(signal.SIGTERM, self.clean_die)
 
         # start up the event publisher, so we can see events during startup
         self.event_publisher = salt.utils.event.AsyncEventPublisher(
@@ -1867,7 +1906,10 @@ class Syndic(Minion):
         '''
         Lock onto the publisher. This is the main event loop for the syndic
         '''
-        signal.signal(signal.SIGTERM, self.clean_die)
+        # Properly exit if a SIGTERM is signalled
+        if signal.getsignal(signal.SIGTERM) is signal.SIG_DFL:
+            # No SIGTERM installed, install ours
+            signal.signal(signal.SIGTERM, self.clean_die)
         log.debug('Syndic \'{0}\' trying to tune in'.format(self.opts['id']))
 
         if start:
@@ -2172,7 +2214,7 @@ class MultiSyndic(MinionBase):
                 # Not a job return
                 return
             if self.syndic_mode == 'cluster' and event['data'].get('master_id', 0) == self.opts.get('master_id', 1):
-                log.debug('Return recieved with matching master_id, not forwarding')
+                log.debug('Return received with matching master_id, not forwarding')
                 return
 
             jdict = self.jids.setdefault(event['tag'], {})
@@ -2593,17 +2635,20 @@ class ProxyMinion(Minion):
             self.returners)
 
         # add default scheduling jobs to the minions scheduler
-        if 'mine.update' in self.functions:
-            log.info('Added mine.update to scheduler')
+        if self.opts['mine_enabled'] and 'mine.update' in self.functions:
             self.schedule.add_job({
                 '__mine_interval':
                     {
                         'function': 'mine.update',
                         'minutes': self.opts['mine_interval'],
                         'jid_include': True,
-                        'maxrunning': 2
+                        'maxrunning': 2,
+                        'return_job': self.opts.get('mine_return_job', False)
                     }
             }, persist=True)
+            log.info('Added mine.update to scheduler')
+        else:
+            self.schedule.delete_job('__mine_interval', persist=True)
 
         # add master_alive job if enabled
         if self.opts['master_alive_interval'] > 0:

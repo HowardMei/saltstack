@@ -31,7 +31,11 @@ def __virtual__():
     '''
     Only load if git exists on the system
     '''
-    return True if salt.utils.which('git') else False
+    if salt.utils.which('git') is None:
+        return (False,
+                'The git execution module cannot be loaded: git unavailable.')
+    else:
+        return True
 
 
 def _config_getter(get_opt,
@@ -974,7 +978,7 @@ def config_get_regexp(key,
         ret.setdefault(param, []).append(value)
     return ret
 
-config_get_regex = config_get_regexp
+config_get_regex = salt.utils.alias_function(config_get_regexp, 'config_get_regex')
 
 
 def config_set(key,
@@ -1394,10 +1398,8 @@ def fetch(cwd,
     command.extend(
         [x for x in _format_opts(opts) if x not in ('-f', '--force')]
     )
-    if remote and not isinstance(remote, six.string_types):
-        remote = str(remote)
     if remote:
-        command.append(remote)
+        command.append(str(remote))
     if refspecs is not None:
         if isinstance(refspecs, (list, tuple)):
             refspec_list = []

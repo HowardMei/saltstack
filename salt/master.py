@@ -12,6 +12,7 @@ import re
 import sys
 import time
 import errno
+import signal
 import logging
 import tempfile
 import traceback
@@ -244,7 +245,7 @@ class Maintenance(MultiprocessingProcess):
         if to_rotate:
             log.info('Rotating master AES key')
             for secret_key, secret_map in six.iteritems(SMaster.secrets):
-                # should be unecessary-- since no one else should be modifying
+                # should be unnecessary-- since no one else should be modifying
                 with secret_map['secret'].get_lock():
                     secret_map['secret'].value = secret_map['reload']()
                 self.event.fire_event({'rotate_{0}_key'.format(secret_key): True}, tag='key')
@@ -460,30 +461,40 @@ class Master(SMaster):
         enable_sigusr2_handler()
 
         self.__set_max_open_files()
+
+        # Before creating and adding processes to the process manager, store
+        # references to the SIGTERM/SIGINT signal handlers and restore the
+        # default handlers. We don't want the processes being started to
+        # inherit those signal handlers
+        old_sigint_handler = signal.getsignal(signal.SIGINT)
+        old_sigterm_handler = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
         log.info('Creating master process manager')
-        process_manager = salt.utils.process.ProcessManager()
+        self.process_manager = salt.utils.process.ProcessManager()
         log.info('Creating master maintenance process')
         pub_channels = []
         for transport, opts in iter_transport_opts(self.opts):
             chan = salt.transport.server.PubServerChannel.factory(opts)
-            chan.pre_fork(process_manager)
+            chan.pre_fork(self.process_manager)
             pub_channels.append(chan)
 
         log.info('Creating master event publisher process')
-        process_manager.add_process(salt.utils.event.EventPublisher, args=(self.opts,))
-        salt.engines.start_engines(self.opts, process_manager)
+        self.process_manager.add_process(salt.utils.event.EventPublisher, args=(self.opts,))
+        salt.engines.start_engines(self.opts, self.process_manager)
 
         # must be after channels
-        process_manager.add_process(Maintenance, args=(self.opts,))
+        self.process_manager.add_process(Maintenance, args=(self.opts,))
         log.info('Creating master publisher process')
 
         if 'reactor' in self.opts:
             log.info('Creating master reactor process')
-            process_manager.add_process(salt.utils.reactor.Reactor, args=(self.opts,))
+            self.process_manager.add_process(salt.utils.reactor.Reactor, args=(self.opts,))
 
         if self.opts.get('event_return'):
             log.info('Creating master event return process')
-            process_manager.add_process(salt.utils.event.EventReturn, args=(self.opts,))
+            self.process_manager.add_process(salt.utils.event.EventReturn, args=(self.opts,))
 
         ext_procs = self.opts.get('ext_processes', [])
         for proc in ext_procs:
@@ -493,19 +504,19 @@ class Master(SMaster):
                 cls = proc.split('.')[-1]
                 _tmp = __import__(mod, globals(), locals(), [cls], -1)
                 cls = _tmp.__getattribute__(cls)
-                process_manager.add_process(cls, args=(self.opts,))
+                self.process_manager.add_process(cls, args=(self.opts,))
             except Exception:
                 log.error(('Error creating ext_processes '
                            'process: {0}').format(proc))
 
         if HAS_HALITE and 'halite' in self.opts:
             log.info('Creating master halite process')
-            process_manager.add_process(Halite, args=(self.opts['halite'],))
+            self.process_manager.add_process(Halite, args=(self.opts['halite'],))
 
         # TODO: remove, or at least push into the transport stuff (pre-fork probably makes sense there)
         if self.opts['con_cache']:
             log.info('Creating master concache process')
-            process_manager.add_process(ConnectedCache, args=(self.opts,))
+            self.process_manager.add_process(ConnectedCache, args=(self.opts,))
             # workaround for issue #16315, race condition
             log.debug('Sleeping for two seconds to let concache rest')
             time.sleep(2)
@@ -515,15 +526,30 @@ class Master(SMaster):
         if salt.utils.is_windows():
             kwargs['log_queue'] = (
                     salt.log.setup.get_multiprocessing_logging_queue())
-        process_manager.add_process(self.run_reqserver, kwargs=kwargs)
+        self.process_manager.add_process(self.run_reqserver, kwargs=kwargs)
 
-        try:
-            process_manager.run()
-        except KeyboardInterrupt:
-            # Shut the master down gracefully on SIGINT
-            log.warn('Stopping the Salt Master')
-            process_manager.kill_children()
-            log.warn('Exiting on Ctrl-c')
+        # Restore the old SIGTERM/SIGINT handler now that all processes have
+        # been added to the process manager
+        if old_sigint_handler is signal.SIG_DFL:
+            # No custom signal handling was added, install our own
+            signal.signal(signal.SIGINT, self._handle_signals)
+        else:
+            signal.signal(signal.SIGINT, old_sigint_handler)
+
+        if old_sigterm_handler is signal.SIG_DFL:
+            # No custom signal handling was added, install our own
+            signal.signal(signal.SIGINT, self._handle_signals)
+        else:
+            signal.signal(signal.SIGTERM, old_sigterm_handler)
+
+        self.process_manager.run()
+
+    def _handle_signals(self, signum, sigframe):  # pylint: disable=unused-argument
+        # escalate the signals to the process manager
+        self.process_manager.stop_restarting()
+        self.process_manager.send_signal_to_processes(signum)
+        # kill any remaining processes
+        self.process_manager.kill_children()
 
 
 class Halite(MultiprocessingProcess):
@@ -1769,10 +1795,18 @@ class ClearFuncs(object):
         '''
         extra = clear_load.get('kwargs', {})
 
-        client_acl = salt.acl.ClientACL(self.opts['client_acl_blacklist'])
+        if self.opts['client_acl'] or self.opts['client_acl_blacklist']:
+            salt.utils.warn_until(
+                    'Nitrogen',
+                    'ACL rules should be configured with \'publisher_acl\' and '
+                    '\'publisher_acl_blacklist\' not \'client_acl\' and \'client_acl_blacklist\'. '
+                    'This functionality will be removed in Salt Nitrogen.'
+                    )
+        publisher_acl = salt.acl.PublisherACL(
+                self.opts['publisher_acl_blacklist'] or self.opts['client_acl_blacklist'])
 
-        if client_acl.user_is_blacklisted(clear_load['user']) or \
-                client_acl.cmd_is_blacklisted(clear_load['fun']):
+        if publisher_acl.user_is_blacklisted(clear_load['user']) or \
+                publisher_acl.cmd_is_blacklisted(clear_load['fun']):
             log.error(
                 '{user} does not have permissions to run {function}. Please '
                 'contact your local administrator if you believe this is in '
@@ -1949,9 +1983,10 @@ class ClearFuncs(object):
                         'Authentication failure of type "user" occurred.'
                     )
                     return ''
-                if self.opts['sudo_acl'] and self.opts['client_acl']:
+                publisher_acl = self.opts['publisher_acl'] or self.opts['client_acl']
+                if self.opts['sudo_acl'] and publisher_acl:
                     good = self.ckminions.auth_check(
-                                self.opts['client_acl'].get(clear_load['user'].split('_', 1)[-1]),
+                                publisher_acl.get(clear_load['user'].split('_', 1)[-1]),
                                 clear_load['fun'],
                                 clear_load['tgt'],
                                 clear_load.get('tgt_type', 'glob'))
@@ -1985,13 +2020,14 @@ class ClearFuncs(object):
                             'Authentication failure of type "user" occurred.'
                         )
                         return ''
-                    if clear_load['user'] not in self.opts['client_acl']:
+                    acl = self.opts['publisher_acl'] or self.opts['client_acl']
+                    if clear_load['user'] not in acl:
                         log.warning(
                             'Authentication failure of type "user" occurred.'
                         )
                         return ''
                     good = self.ckminions.auth_check(
-                        self.opts['client_acl'][clear_load['user']],
+                        acl[clear_load['user']],
                         clear_load['fun'],
                         clear_load['tgt'],
                         clear_load.get('tgt_type', 'glob'))
