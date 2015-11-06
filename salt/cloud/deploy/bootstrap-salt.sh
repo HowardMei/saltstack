@@ -19,10 +19,11 @@
 set -o nounset                              # Treat unset variables as an error
 __ScriptVersion="2015.11.04"
 __ScriptName="bootstrap-salt.sh"
-__ScriptVersion="v${__ScriptVersion}/Mubiic-r2015.08.05"
+__ScriptVersion="v${__ScriptVersion}/Mubiic-r2015.11.05"
 __GPG_KEY_URLFILE="http://debian.saltstack.com/debian-salt-team-joehealy.gpg.key"
 __CUSTOM_REPO_NAME="saltstack/salt"
 __CUSTOM_REPO_PATH="github.com/${__CUSTOM_REPO_NAME}"
+__CUSTOM_PKG_PATH="repo.saltstack.com"
 __CUSTOM_RAW_URLPATH="raw.githubusercontent.com/${__CUSTOM_REPO_NAME}"
 __GET_PIP_URLFILE="https://bootstrap.pypa.io/get-pip.py"
 
@@ -217,7 +218,7 @@ __SIMPLIFY_VERSION=$BS_TRUE
 _LIBCLOUD_MIN_VERSION="0.16.0"
 _PY_REQUESTS_MIN_VERSION="2.0"
 _EXTRA_PACKAGES="git ca-certificates"
-_BASE_PIP_PACKAGES="virtualenv pss gitpython pew apache-libcloud msgpack-python docker-py docker-compose"
+_BASE_PIP_PACKAGES="virtualenv pss gitpython apache-libcloud msgpack-python docker-py"
 _HTTP_PROXY=""
 _DISABLE_SALT_CHECKS=$BS_FALSE
 __SALT_GIT_CHECKOUT_DIR=${BS_SALT_GIT_CHECKOUT_DIR:-/tmp/git/salt}
@@ -1834,7 +1835,7 @@ install_ubuntu_deps() {
 
     __enable_universe_repository || return 1
 
-    # the latest version of 2015.5 and all versions of 2015.8 and beyond are hosted on repo.saltstack.com
+    # the latest version of 2015.5 and all versions of 2015.8 and beyond are hosted on ${__CUSTOM_PKG_PATH}
     if [ "$(echo "$STABLE_REV" | egrep '^(2015\.5|2015\.8|latest)$')" = "" ]; then
         if [ "$DISTRO_MAJOR_VERSION" -lt 14 ]; then
             echoinfo "Installing Python Requests/Chardet from Chris Lea's PPA repository"
@@ -1915,17 +1916,17 @@ install_ubuntu_deps() {
 install_ubuntu_stable_deps() {
     install_ubuntu_deps || return 1
 
-    # the latest version of 2015.5 and all versions of 2015.8 and beyond are hosted on repo.saltstack.com
+    # the latest version of 2015.5 and all versions of 2015.8 and beyond are hosted on ${__CUSTOM_PKG_PATH}
     if [ "$(echo "$STABLE_REV" | egrep '^(2015\.5|2015\.8|latest)$')" != "" ]; then
 
         # Saltstack's Stable Ubuntu repository
         if [ "$(grep -ER 'latest .+ main' /etc/apt)" = "" ]; then
-            echo "deb http://repo.saltstack.com/apt/ubuntu/ubuntu$DISTRO_MAJOR_VERSION/$STABLE_REV $DISTRO_CODENAME main" >> \
+            echo "deb http://${__CUSTOM_PKG_PATH}/apt/ubuntu/ubuntu$DISTRO_MAJOR_VERSION/$STABLE_REV $DISTRO_CODENAME main" >> \
                 /etc/apt/sources.list.d/saltstack.list
         fi
 
         # shellcheck disable=SC2086
-        wget $_WGET_ARGS -q http://repo.saltstack.com/apt/ubuntu/ubuntu$DISTRO_MAJOR_VERSION/$STABLE_REV/SALTSTACK-GPG-KEY.pub -O - | apt-key add - || return 1
+        wget $_WGET_ARGS -q http://${__CUSTOM_PKG_PATH}/apt/ubuntu/ubuntu$DISTRO_MAJOR_VERSION/$STABLE_REV/SALTSTACK-GPG-KEY.pub -O - | apt-key add - || return 1
 
     else
         # Alternate PPAs: salt16, salt17, salt2014-1, salt2014-7
@@ -2438,12 +2439,12 @@ install_debian_8_deps() {
 
     # Saltstack's Stable Debian repository
     if [ "$(grep -R 'latest jessie main' /etc/apt)" = "" ]; then
-        echo "deb http://repo.saltstack.com/apt/debian/latest jessie main" >> \
+        echo "deb http://${__CUSTOM_PKG_PATH}/apt/debian/latest jessie main" >> \
             /etc/apt/sources.list.d/saltstack.list
     fi
 
     # shellcheck disable=SC2086
-    wget $_WGET_ARGS -q https://repo.saltstack.com/apt/debian/latest/SALTSTACK-GPG-KEY.pub -O - | apt-key add - || return 1
+    wget $_WGET_ARGS -q https://${__CUSTOM_PKG_PATH}/apt/debian/latest/SALTSTACK-GPG-KEY.pub -O - | apt-key add - || return 1
 
     apt-get update || return 1
     __PACKAGES="libzmq3 libzmq3-dev python-zmq python-requests python-apt"
@@ -2998,15 +2999,15 @@ __install_saltstack_rhel5_repository() {
         cat <<_eof > /etc/yum.repos.d/repo-saltstack-el5.repo
 [repo-saltstack-el5]
 name=SaltStack EL5 Repo
-baseurl=https://repo.saltstack.com/yum/rhel5/
+baseurl=https://${__CUSTOM_PKG_PATH}/yum/rhel5/
 skip_if_unavailable=True
 gpgcheck=1
-gpgkey=https://repo.saltstack.com/yum/rhel5/SALTSTACK-EL5-GPG-KEY.pub
+gpgkey=https://${__CUSTOM_PKG_PATH}/yum/rhel5/SALTSTACK-EL5-GPG-KEY.pub
 enabled=1
 enabled_metadata=1
 _eof
 
-        __fetch_url /tmp/repo-saltstack-el5.pub "https://repo.saltstack.com/yum/rhel5/SALTSTACK-EL5-GPG-KEY.pub" || return 1
+        __fetch_url /tmp/repo-saltstack-el5.pub "https://${__CUSTOM_PKG_PATH}/yum/rhel5/SALTSTACK-EL5-GPG-KEY.pub" || return 1
         rpm --import /tmp/repo-saltstack-el5.pub || return 1
         rm -f /tmp/repo-saltstack-el5.pub
     fi
@@ -3018,15 +3019,15 @@ __install_saltstack_rhel_repository() {
         cat <<_eof > "/etc/yum.repos.d/repo-saltstack-el${DISTRO_MAJOR_VERSION}.repo"
 [repo-saltstack-el${DISTRO_MAJOR_VERSION}]
 name=SaltStack EL${DISTRO_MAJOR_VERSION} Repo
-baseurl=https://repo.saltstack.com/yum/rhel${DISTRO_MAJOR_VERSION}/
+baseurl=https://${__CUSTOM_PKG_PATH}/yum/rhel${DISTRO_MAJOR_VERSION}/
 skip_if_unavailable=True
 gpgcheck=1
-gpgkey=https://repo.saltstack.com/yum/rhel${DISTRO_MAJOR_VERSION}/SALTSTACK-GPG-KEY.pub
+gpgkey=https://${__CUSTOM_PKG_PATH}/yum/rhel${DISTRO_MAJOR_VERSION}/SALTSTACK-GPG-KEY.pub
 enabled=1
 enabled_metadata=1
 _eof
 
-        __fetch_url /tmp/repo-saltstack.pub "https://repo.saltstack.com/yum/rhel${DISTRO_MAJOR_VERSION}/SALTSTACK-GPG-KEY.pub" || return 1
+        __fetch_url /tmp/repo-saltstack.pub "https://${__CUSTOM_PKG_PATH}/yum/rhel${DISTRO_MAJOR_VERSION}/SALTSTACK-GPG-KEY.pub" || return 1
         rpm --import /tmp/repo-saltstack.pub || return 1
         rm -f /tmp/repo-saltstack.pub
     fi
@@ -4128,7 +4129,7 @@ __freebsd_get_packagesite() {
     _PACKAGESITE="http://pkg.freebsd.org/${ABI}/latest"
     # Awkwardly, we want the `${ABI}` to be in conf file without escaping
     PKGCONFURL="pkg+http://pkg.freebsd.org/\${ABI}/latest"
-    SALTPKGCONFURL="http://repo.saltstack.com/freebsd/\${ABI}/"
+    SALTPKGCONFURL="http://${__CUSTOM_PKG_PATH}/freebsd/\${ABI}/"
 
     # Treat unset variables as errors once more
     set -o nounset
