@@ -5,12 +5,12 @@ A collection of mixins useful for the various *Client interfaces
 
 # Import Python libs
 from __future__ import absolute_import, print_function
-import copy
 import logging
 import weakref
 import traceback
 import collections
 import multiprocessing
+import tornado.stack_context
 
 # Import Salt libs
 import salt.exceptions
@@ -73,11 +73,11 @@ class ClientFuncsDict(collections.MutableMapping):
                    'kwargs': kwargs,
                    }
             pub_data = {}
-            # Copy kwargs so we can iterate over and pop the pub data
-            _kwargs = copy.deepcopy(kwargs)
+            # Copy kwargs keys so we can iterate over and pop the pub data
+            kwargs_keys = list(kwargs)
 
             # pull out pub_data if you have it
-            for kwargs_key, kwargs_value in six.iteritems(_kwargs):
+            for kwargs_key in kwargs_keys:
                 if kwargs_key.startswith('__pub_'):
                     pub_data[kwargs_key] = kwargs.pop(kwargs_key)
 
@@ -85,13 +85,13 @@ class ClientFuncsDict(collections.MutableMapping):
 
             user = salt.utils.get_specific_user()
             return self.client._proc_function(
-                   key,
-                   low,
-                   user,
-                   async_pub['tag'],  # TODO: fix
-                   async_pub['jid'],  # TODO: fix
-                   False,  # Don't daemonize
-                   )
+                key,
+                low,
+                user,
+                async_pub['tag'],  # TODO: fix
+                async_pub['jid'],  # TODO: fix
+                False,  # Don't daemonize
+            )
         return wrapper
 
     def __len__(self):
@@ -285,9 +285,9 @@ class SyncClientMixin(object):
             # Inject some useful globals to *all* the function's global
             # namespace only once per module-- not per func
             completed_funcs = []
-            _functions = copy.deepcopy(self.functions)
+            _func_keys = list(self.functions)
 
-            for mod_name in six.iterkeys(_functions):
+            for mod_name in _func_keys:
                 if '.' not in mod_name:
                     continue
                 mod, _ = mod_name.split('.', 1)
@@ -334,8 +334,10 @@ class SyncClientMixin(object):
             else:
                 kwargs = low['kwargs']
 
-            data['return'] = self.functions[fun](*args, **kwargs)
-            data['success'] = True
+            # Initialize a context for executing the method.
+            with tornado.stack_context.StackContext(self.functions.context_dict.clone):
+                data['return'] = self.functions[fun](*args, **kwargs)
+                data['success'] = True
         except (Exception, SystemExit) as ex:
             if isinstance(ex, salt.exceptions.NotImplemented):
                 data['return'] = str(ex)

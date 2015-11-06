@@ -653,9 +653,12 @@ class SPMClient(object):
         self.formula_conf = formula_conf
 
         formula_tar = tarfile.open(out_path, 'w:bz2')
+
         try:
+            formula_tar.add(formula_path, formula_conf['name'], filter=self._exclude)
             formula_tar.add(self.abspath, formula_conf['name'], filter=self._exclude)
         except TypeError:
+            formula_tar.add(formula_path, formula_conf['name'], exclude=self._exclude)
             formula_tar.add(self.abspath, formula_conf['name'], exclude=self._exclude)
         formula_tar.close()
 

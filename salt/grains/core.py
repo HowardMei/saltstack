@@ -14,6 +14,7 @@ as those returned here
 from __future__ import absolute_import
 import itertools
 import os
+import json
 import socket
 import sys
 import re
@@ -750,6 +751,8 @@ def _virtual(osdata):
             )
             if product.startswith('VMware'):
                 grains['virtual'] = 'VMware'
+            if product.startswith('VirtualBox'):
+                grains['virtual'] = 'VirtualBox'
             if maker.startswith('Xen'):
                 grains['virtual_subtype'] = '{0} {1}'.format(maker, product)
                 grains['virtual'] = 'xen'
@@ -1294,6 +1297,8 @@ def os_data():
             uname_v = __salt__['cmd.run']('uname -v')
             grains['os'] = grains['osfullname'] = 'SmartOS'
             grains['osrelease'] = uname_v[uname_v.index('_')+1:]
+        if salt.utils.is_smartos_globalzone():
+            grains.update(_smartos_computenode_data())
         elif os.path.isfile('/etc/release'):
             with salt.utils.fopen('/etc/release', 'r') as fp_:
                 rel_data = fp_.read()
@@ -1532,6 +1537,7 @@ def fqdn_ip6():
 def ip_interfaces():
     '''
     Provide a dict of the connected interfaces and their ip addresses
+    The addresses will be passed as a list for each interface
     '''
     # Provides:
     #   ip_interfaces
@@ -1559,6 +1565,7 @@ def ip_interfaces():
 def ip4_interfaces():
     '''
     Provide a dict of the connected interfaces and their ip4 addresses
+    The addresses will be passed as a list for each interface
     '''
     # Provides:
     #   ip_interfaces
@@ -1583,6 +1590,7 @@ def ip4_interfaces():
 def ip6_interfaces():
     '''
     Provide a dict of the connected interfaces and their ip6 addresses
+    The addresses will be passed as a list for each interface
     '''
     # Provides:
     #   ip_interfaces
@@ -1853,6 +1861,43 @@ def _hw_data(osdata):
             value = __salt__['cmd.run']('{0} -b {1}'.format(sysctl, oid))
             if not value.endswith(' is invalid'):
                 grains[key] = value
+
+    return grains
+
+
+def _smartos_computenode_data():
+    '''
+    Return useful information from a SmartOS compute node
+    '''
+    # Provides:
+    #   vms_total
+    #   vms_running
+    #   vms_stopped
+    #   sdc_version
+    #   vm_capable
+    #   vm_hw_virt
+
+    if salt.utils.is_proxy():
+        return {}
+
+    grains = {}
+
+    # *_vms grains
+    grains['computenode_vms_total'] = len(__salt__['cmd.run']('vmadm list -p').split("\n"))
+    grains['computenode_vms_running'] = len(__salt__['cmd.run']('vmadm list -p state=running').split("\n"))
+    grains['computenode_vms_stopped'] = len(__salt__['cmd.run']('vmadm list -p state=stopped').split("\n"))
+
+    # sysinfo derived grains
+    sysinfo = json.loads(__salt__['cmd.run']('sysinfo'))
+    grains['computenode_sdc_version'] = sysinfo['SDC Version']
+    grains['computenode_vm_capable'] = sysinfo['VM Capable']
+    if sysinfo['VM Capable']:
+        grains['computenode_vm_hw_virt'] = sysinfo['CPU Virtualization']
+
+    # sysinfo derived smbios grains
+    grains['manufacturer'] = sysinfo['Manufacturer']
+    grains['productname'] = sysinfo['Product']
+    grains['uuid'] = sysinfo['UUID']
 
     return grains
 
