@@ -51,9 +51,12 @@ __virtualname__ = 'pkg'
 def __virtual__():
     '''
     Load as 'pkg' on FreeBSD 10 and greater.
+    Load as 'pkg' on DragonFly BSD.
     Load as 'pkg' on FreeBSD 9 when config option
     ``providers:pkg`` is set to 'pkgng'.
     '''
+    if __grains__['kernel'] == 'DragonFly':
+        return __virtualname__
     if __grains__['os'] == 'FreeBSD' and float(__grains__['osrelease']) >= 10:
         return __virtualname__
     if __grains__['os'] == 'FreeBSD' and \
@@ -66,7 +69,9 @@ def __virtual__():
             log.debug('Configuration option \'providers:pkg\' is set to '
                 '\'pkgng\', using \'pkgng\' in favor of \'freebsdpkg\'.')
             return __virtualname__
-    return False
+    return (False,
+            'The pkgng execution module cannot be loaded: only available '
+            'on FreeBSD 10 or FreeBSD 9 with providers.pkg set to pkgng.')
 
 
 def _pkg(jail=None, chroot=None):
@@ -740,7 +745,7 @@ def install(name=None,
     if pkg_params is None or len(pkg_params) == 0:
         return {}
 
-    opts = ''
+    opts = 'y'
     if salt.utils.is_true(orphan):
         opts += 'A'
     if salt.utils.is_true(force):
@@ -751,8 +756,6 @@ def install(name=None,
         opts += 'U'
     if salt.utils.is_true(dryrun):
         opts += 'n'
-    if not salt.utils.is_true(dryrun):
-        opts += 'y'
     if salt.utils.is_true(quiet):
         opts += 'q'
     if salt.utils.is_true(reinstall_requires):
@@ -794,11 +797,29 @@ def install(name=None,
         # pkg add doesn't have a dryrun mode, so echo out what will be run
         return ' '.join(cmd)
 
-    __salt__['cmd.run'](cmd, output_loglevel='trace', python_shell=False)
+    out = __salt__['cmd.run_all'](
+        cmd,
+        output_loglevel='trace',
+        python_shell=False
+    )
+
+    if out['retcode'] != 0 and out['stderr']:
+        errors = [out['stderr']]
+    else:
+        errors = []
+
     __context__.pop(_contextkey(jail, chroot), None)
     __context__.pop(_contextkey(jail, chroot, prefix='pkg.origin'), None)
     new = list_pkgs(jail=jail, chroot=chroot)
-    return salt.utils.compare_dicts(old, new)
+    ret = salt.utils.compare_dicts(old, new)
+
+    if errors:
+        raise CommandExecutionError(
+            'Problem encountered installing package(s)',
+            info={'errors': errors, 'changes': ret}
+        )
+
+    return ret
 
 
 def remove(name=None,
@@ -945,11 +966,30 @@ def remove(name=None,
     if opts:
         cmd.append('-' + opts)
     cmd.extend(targets)
-    __salt__['cmd.run'](cmd, output_loglevel='trace', python_shell=False)
+
+    out = __salt__['cmd.run_all'](
+        cmd,
+        output_loglevel='trace',
+        python_shell=False
+    )
+
+    if out['retcode'] != 0 and out['stderr']:
+        errors = [out['stderr']]
+    else:
+        errors = []
+
     __context__.pop(_contextkey(jail, chroot), None)
     __context__.pop(_contextkey(jail, chroot, prefix='pkg.origin'), None)
     new = list_pkgs(jail=jail, chroot=chroot, with_origin=True)
-    return salt.utils.compare_dicts(old, new)
+    ret = salt.utils.compare_dicts(old, new)
+
+    if errors:
+        raise CommandExecutionError(
+            'Problem encountered removing package(s)',
+            info={'errors': errors, 'changes': ret}
+        )
+
+    return ret
 
 # Support pkg.delete to remove packages, since this is the CLI usage
 delete = salt.utils.alias_function(remove, 'delete')
@@ -1050,21 +1090,21 @@ def upgrade(*names, **kwargs):
     cmd.extend(names)
 
     old = list_pkgs()
-    call = __salt__['cmd.run_all'](
-        cmd,
-        output_loglevel='trace',
-        python_shell=False
-    )
+    call = __salt__['cmd.run_all'](cmd,
+                                   output_loglevel='trace',
+                                   python_shell=False,
+                                   redirect_stderr=True)
+
     if call['retcode'] != 0:
         ret['result'] = False
-        if 'stderr' in call:
-            ret['comment'] += call['stderr']
-        if 'stdout' in call:
-            ret['comment'] += call['stdout']
-    else:
-        __context__.pop('pkg.list_pkgs', None)
-        new = list_pkgs()
-        ret['changes'] = salt.utils.compare_dicts(old, new)
+        if call['stdout']:
+            ret['comment'] = call['stdout']
+
+    __context__.pop(_contextkey(jail, chroot), None)
+    __context__.pop(_contextkey(jail, chroot, prefix='pkg.origin'), None)
+    new = list_pkgs()
+    ret['changes'] = salt.utils.compare_dicts(old, new)
+
     return ret
 
 

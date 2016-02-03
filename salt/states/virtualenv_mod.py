@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 '''
-Setup of Python virtualenv sandboxes
-====================================
+Setup of Python virtualenv sandboxes.
 
+.. versionadded:: 0.17.0
 '''
 from __future__ import absolute_import
 
@@ -14,6 +14,7 @@ import os
 import salt.version
 import salt.utils
 
+from salt.ext import six
 log = logging.getLogger(__name__)
 
 # Define the module's virtual name
@@ -50,7 +51,8 @@ def managed(name,
             use_vt=False,
             env_vars=None,
             no_use_wheel=False,
-            pip_upgrade=False):
+            pip_upgrade=False,
+            pip_pkgs=None):
     '''
     Create a virtualenv and optionally manage it with pip
 
@@ -84,6 +86,9 @@ def managed(name,
         pick up a header file while compiling.
     pip_upgrade: False
         Pass `--upgrade` to `pip install`.
+    pip_pkgs: None
+        As an alternative to `requirements`, pass a list of pip packages that
+        should be installed.
 
 
      Also accepts any kwargs that the virtualenv module will.
@@ -210,9 +215,25 @@ def managed(name,
             return ret
 
     # Populate the venv via a requirements file
-    if requirements:
+    if requirements or pip_pkgs:
         before = set(__salt__['pip.freeze'](bin_env=name, user=user, use_vt=use_vt))
+
+        if requirements:
+
+            if isinstance(requirements, six.string_types):
+                req_canary = requirements.split(',')[0]
+            elif isinstance(requirements, list):
+                req_canary = requirements[0]
+            else:
+                raise TypeError(
+                    'pip requirements must be either a string or a list'
+                )
+
+            if req_canary != os.path.abspath(req_canary):
+                cwd = os.path.dirname(os.path.abspath(req_canary))
+
         _ret = __salt__['pip.install'](
+            pkgs=pip_pkgs,
             requirements=requirements,
             bin_env=name,
             use_wheel=use_wheel,

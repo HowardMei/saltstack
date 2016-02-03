@@ -32,12 +32,15 @@ def __virtual__():
     '''
     if salt.utils.is_proxy():
         return __virtualname__
-    return False
+    return (False, 'The chassis execution module cannot be loaded: '
+            'this only works in proxy minions.')
 
 
 def cmd(cmd, *args, **kwargs):
+    proxyprefix = __opts__['proxy']['proxytype']
+    (username, password) = __proxy__[proxyprefix+'.find_credentials']()
+    kwargs['admin_username'] = username
+    kwargs['admin_password'] = password
+    kwargs['host'] = __proxy__[proxyprefix+'.host']()
     proxycmd = __opts__['proxy']['proxytype'] + '.chconfig'
-    kwargs['admin_username'] = __pillar__['proxy']['admin_username']
-    kwargs['admin_password'] = __pillar__['proxy']['admin_password']
-    kwargs['host'] = __pillar__['proxy']['host']
     return __proxy__[proxycmd](cmd, *args, **kwargs)

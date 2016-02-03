@@ -117,18 +117,18 @@ def __virtual__():
     # which was added in boto 2.8.0
     # https://github.com/boto/boto/commit/33ac26b416fbb48a60602542b4ce15dcc7029f12
     if not HAS_BOTO:
-        return False
+        return (False, 'The boto_vpc module could not be loaded: boto libraries not found')
     elif _LooseVersion(boto.__version__) < _LooseVersion(required_boto_version):
-        return False
+        return (False, 'The boto_vpc module could not be loaded: boto library is not required version 2.8.0')
     else:
 
         return True
 
 
-def __init__(opts):
+def __init__(opts, pack=None):
     salt.utils.compat.pack_dunder(__name__)
     if HAS_BOTO:
-        __utils__['boto.assign_funcs'](__name__, 'vpc')
+        __utils__['boto.assign_funcs'](__name__, 'vpc', pack=pack)
 
 
 def check_vpc(vpc_id=None, vpc_name=None, region=None, key=None,
@@ -726,7 +726,7 @@ def _find_subnets(subnet_name=None, vpc_id=None, cidr=None, tags=None, conn=None
     '''
 
     if not any(subnet_name, tags, cidr):
-        raise SaltInvocationError('At least on of the following must be '
+        raise SaltInvocationError('At least one of the following must be '
                                   'specified: subnet_name, cidr or tags.')
 
     filter_parameters = {'filters': {}}
@@ -1841,10 +1841,10 @@ def route_exists(destination_cidr_block, route_table_name=None, route_table_id=N
     '''
 
     if not any((route_table_name, route_table_id)):
-        raise SaltInvocationError('At least on of the following must be specified: route table name or route table id.')
+        raise SaltInvocationError('At least one of the following must be specified: route table name or route table id.')
 
     if not any((gateway_id, instance_id, interface_id)):
-        raise SaltInvocationError('At least on of the following must be specified: gateway id, instance id'
+        raise SaltInvocationError('At least one of the following must be specified: gateway id, instance id'
                                   ' or interface id.')
 
     try:
@@ -2163,7 +2163,7 @@ def describe_route_table(route_table_id=None, route_table_name=None,
         route_tables = conn.get_all_route_tables(**filter_parameters)
 
         if not route_tables:
-            return False
+            return {}
 
         route_table = {}
         keys = ['id', 'vpc_id', 'tags', 'routes', 'associations']

@@ -27,6 +27,15 @@ demonstration of a working proxy minion.
 See the :doc:`Proxy Minion SSH Walkthrough </topics/proxyminion/ssh>` for an end-to-end
 demonstration of a working SSH proxy minion.
 
+
+See :doc:`Proxyminion States </topics/proxyminion/state>` to configure and
+run ``salt-proxy`` on a remote minion. Specify all your master side
+proxy (pillar) configuration and use this state to remotely configure proxies on one
+or more minions.
+
+See :doc:`Proxyminion Beacon </topics/proxyminion/beacon>` to help
+with easy configuration and management of ``salt-proxy`` processes.
+
 New in 2015.8.2
 ---------------
 
@@ -716,5 +725,8 @@ For more information please refer to class `SSHConnection`_.
     :glob:
 
     ssh
+    beacon
+    state
+    ../tutorials/esxi_proxy_minion
 
 .. _SSHConnection: https://github.com/saltstack/salt/blob/b8271c7512da7e048019ee26422be9e7d6b795ab/salt/utils/vt_helper.py#L28

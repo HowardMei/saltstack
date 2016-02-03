@@ -7,7 +7,9 @@ Module for working with the Zenoss API
 :configuration: This module requires a 'zenoss' entry in the master/minion config.
 
     For example:
+
     .. code-block:: yaml
+
         zenoss:
           hostname: https://zenoss.example.com
           username: admin
@@ -148,7 +150,7 @@ def device_exists(device=None):
     return False
 
 
-def add_device(device=None, device_class=None, collector='localhost', prod_state=None):
+def add_device(device=None, device_class=None, collector='localhost', prod_state=1000):
     '''
     A function to connect to a zenoss server and add a new device entry.
 

@@ -196,7 +196,7 @@ def __virtual__():
     '''
     if HAS_MYSQLDB:
         return True
-    return False
+    return (False, 'The mysql execution module cannot be loaded: neither MySQLdb nor PyMySQL is available.')
 
 
 def __check_table(name, table, **connection_args):
@@ -834,6 +834,57 @@ def db_list(**connection_args):
     return ret
 
 
+def alter_db(name, character_set=None, collate=None, **connection_args):
+    '''
+    Modify database using ``ALTER DATABASE %(dbname)s CHARACTER SET %(charset)s
+    COLLATE %(collation)s;`` query.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' mysql.alter_db testdb charset='latin1'
+    '''
+    dbc = _connect(**connection_args)
+    if dbc is None:
+        return []
+    cur = dbc.cursor()
+    existing = db_get(name, **connection_args)
+    qry = 'ALTER DATABASE {0} CHARACTER SET {1} COLLATE {2};'.format(
+        name.replace('%', r'\%').replace('_', r'\_'),
+        character_set or existing.get('character_set'),
+        collate or existing.get('collate'))
+    args = {}
+    _execute(cur, qry, args)
+
+
+def db_get(name, **connection_args):
+    '''
+    Return a list of databases of a MySQL server using the output
+    from the ``SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM
+    INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='dbname';`` query.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' mysql.db_get test
+    '''
+    dbc = _connect(**connection_args)
+    if dbc is None:
+        return []
+    cur = dbc.cursor()
+    qry = ('SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM '
+           'INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME=%(dbname)s;')
+    args = {"dbname": name}
+    _execute(cur, qry, args)
+    if cur.rowcount:
+        rows = cur.fetchall()
+        return {'character_set': rows[0][0],
+                'collate': rows[0][1]}
+    return {}
+
+
 def db_tables(name, **connection_args):
     '''
     Shows the tables in the given MySQL database (if exists)
@@ -888,7 +939,7 @@ def db_exists(name, **connection_args):
     # Warn: here db identifier is not backtyped but should be
     #  escaped as a string value. Note also that LIKE special characters
     # '_' and '%' should also be escaped.
-    args = {"dbname": name.replace('%', r'\%').replace('_', r'\_')}
+    args = {"dbname": name}
     qry = "SHOW DATABASES LIKE %(dbname)s;"
     try:
         _execute(cur, qry, args)
@@ -1031,6 +1082,7 @@ def user_exists(user,
                 password_hash=None,
                 passwordless=False,
                 unix_socket=False,
+                password_column='Password',
                 **connection_args):
     '''
     Checks if a user exists on the MySQL server. A login can be checked to see
@@ -1047,6 +1099,7 @@ def user_exists(user,
         salt '*' mysql.user_exists 'username' 'hostname' 'password'
         salt '*' mysql.user_exists 'username' 'hostname' password_hash='hash'
         salt '*' mysql.user_exists 'username' passwordless=True
+        salt '*' mysql.user_exists 'username' password_column='authentication_string'
     '''
     dbc = _connect(**connection_args)
     # Did we fail to connect with the user we are checking
@@ -1074,12 +1127,12 @@ def user_exists(user,
             qry += ' AND plugin=%(unix_socket)s'
             args['unix_socket'] = 'unix_socket'
         else:
-            qry += ' AND Password = \'\''
+            qry += ' AND ' + password_column + ' = \'\''
     elif password:
-        qry += ' AND Password = PASSWORD(%(password)s)'
+        qry += ' AND ' + password_column + ' = PASSWORD(%(password)s)'
         args['password'] = str(password)
     elif password_hash:
-        qry += ' AND Password = %(password)s'
+        qry += ' AND ' + password_column + ' = %(password)s'
         args['password'] = password_hash
 
     try:
@@ -1132,6 +1185,7 @@ def user_create(user,
                 password_hash=None,
                 allow_passwordless=False,
                 unix_socket=False,
+                password_column='Password',
                 **connection_args):
     '''
     Creates a MySQL user
@@ -1214,7 +1268,7 @@ def user_create(user,
         log.error(err)
         return False
 
-    if user_exists(user, host, password, password_hash, **connection_args):
+    if user_exists(user, host, password, password_hash, password_column=password_column, **connection_args):
         msg = 'User \'{0}\'@\'{1}\' has been created'.format(user, host)
         if not any((password, password_hash)):
             msg += ' with passwordless login'

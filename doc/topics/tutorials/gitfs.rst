@@ -29,6 +29,11 @@ If :conf_master:`gitfs_provider` is not configured, then Salt will prefer
 pygit2_ if a suitable version is available, followed by GitPython_ and
 Dulwich_.
 
+.. note::
+    It is recommended to always run the most recent version of any the below
+    dependencies. Certain features of gitfs may not be available without
+    the most recent version of the chosen library.
+
 .. _pygit2: https://github.com/libgit2/pygit2
 .. _Dulwich: https://www.samba.org/~jelmer/dulwich/
 .. _GitPython: https://github.com/gitpython-developers/GitPython
@@ -64,6 +69,18 @@ packages. Additionally, keep in mind that :ref:`SSH authentication in pygit2
 libraries to be present before libgit2 is built. On some distros (debian based)
 ``pkg-config`` is also required to link libgit2 with libssh2.
 
+.. warning::
+    pygit2_ is actively developed and :ref:`frequently makes
+    non-backwards-compatible API changes <pygit2-version-policy>`, even in
+    minor releases. It is not uncommon for pygit2_ upgrades to result in errors
+    in Salt. Please take care when upgrading pygit2_, and pay close attention
+    to the :ref:`changelog <pygit2-changelog>`, keeping an eye out for API
+    changes. Errors can be reported on the :ref:`SaltStack issue tracker
+    <saltstack-issue-tracker>`.
+
+.. _pygit2-version-policy: http://www.pygit2.org/install.html#version-numbers
+.. _pygit2-changelog: https://github.com/libgit2/pygit2#changelog
+.. _saltstack-issue-tracker: https://github.com/saltstack/salt/issues
 .. __: http://www.pygit2.org/install.html
 .. _libssh2: http://www.libssh2.org/
 

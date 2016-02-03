@@ -5,8 +5,9 @@ involves preparing the three listeners and the workers needed by the master.
 '''
 
 # Import python libs
-from __future__ import absolute_import
+from __future__ import absolute_import, with_statement
 import copy
+import ctypes
 import os
 import re
 import sys
@@ -14,21 +15,30 @@ import time
 import errno
 import signal
 import logging
+import multiprocessing
 import tempfile
 import traceback
 
 # Import third party libs
-import zmq
 from Crypto.PublicKey import RSA
 # pylint: disable=import-error,no-name-in-module,redefined-builtin
 import salt.ext.six as six
 from salt.ext.six.moves import range
 # pylint: enable=import-error,no-name-in-module,redefined-builtin
 
-import zmq.eventloop.ioloop
-# support pyzmq 13.0.x, TODO: remove once we force people to 14.0.x
-if not hasattr(zmq.eventloop.ioloop, 'ZMQIOLoop'):
-    zmq.eventloop.ioloop.ZMQIOLoop = zmq.eventloop.ioloop.IOLoop
+try:
+    import zmq
+    import zmq.eventloop.ioloop
+    # support pyzmq 13.0.x, TODO: remove once we force people to 14.0.x
+    if not hasattr(zmq.eventloop.ioloop, 'ZMQIOLoop'):
+        zmq.eventloop.ioloop.ZMQIOLoop = zmq.eventloop.ioloop.IOLoop
+    LOOP_CLASS = zmq.eventloop.ioloop.ZMQIOLoop
+    HAS_ZMQ = True
+except ImportError:
+    import tornado.ioloop
+    LOOP_CLASS = tornado.ioloop.IOLoop
+    HAS_ZMQ = False
+
 import tornado.gen  # pylint: disable=F0401
 
 # Import salt libs
@@ -63,12 +73,13 @@ import salt.utils.zeromq
 import salt.utils.jid
 from salt.defaults import DEFAULT_TARGET_DELIM
 from salt.exceptions import FileserverConfigError
+from salt.transport import iter_transport_opts
 from salt.utils.debug import (
     enable_sigusr1_handler, enable_sigusr2_handler, inspect_stack
 )
 from salt.utils.event import tagify
 from salt.utils.master import ConnectedCache
-from salt.utils.process import MultiprocessingProcess
+from salt.utils.process import default_signals, SignalHandlingMultiprocessingProcess
 
 try:
     import resource
@@ -129,23 +140,34 @@ class SMaster(object):
         return salt.daemons.masterapi.access_keys(self.opts)
 
 
-class Maintenance(MultiprocessingProcess):
+class Maintenance(SignalHandlingMultiprocessingProcess):
     '''
     A generalized maintenance process which performances maintenance
     routines.
     '''
-    def __init__(self, opts, **kwargs):
+    def __init__(self, opts, log_queue=None):
         '''
         Create a maintenance instance
 
         :param dict opts: The salt options
         '''
-        super(Maintenance, self).__init__(**kwargs)
+        super(Maintenance, self).__init__(log_queue=log_queue)
         self.opts = opts
         # How often do we perform the maintenance tasks
         self.loop_interval = int(self.opts['loop_interval'])
         # Track key rotation intervals
         self.rotate = int(time.time())
+
+    # __setstate__ and __getstate__ are only used on Windows.
+    # We do this so that __init__ will be invoked on Windows in the child
+    # process so that a register_after_fork() equivalent will work on Windows.
+    def __setstate__(self, state):
+        self._is_child = True
+        self.__init__(state['opts'], log_queue=state['log_queue'])
+
+    def __getstate__(self):
+        return {'opts': self.opts,
+                'log_queue': self.log_queue}
 
     def _post_fork_init(self):
         '''
@@ -174,6 +196,17 @@ class Maintenance(MultiprocessingProcess):
         self.git_pillar = salt.daemons.masterapi.init_git_pillar(self.opts)
         # Set up search object
         self.search = salt.search.Search(self.opts)
+
+        self.presence_events = False
+        if self.opts.get('presence_events', False):
+            tcp_only = True
+            for transport, _ in iter_transport_opts(self.opts):
+                if transport != 'tcp':
+                    tcp_only = False
+            if not tcp_only:
+                # For a TCP only transport, the presence events will be
+                # handled in the transport code.
+                self.presence_events = True
 
     def run(self):
         '''
@@ -209,10 +242,7 @@ class Maintenance(MultiprocessingProcess):
             salt.daemons.masterapi.fileserver_update(self.fileserver)
             salt.utils.verify.check_max_open_files(self.opts)
             last = now
-            try:
-                time.sleep(self.loop_interval)
-            except KeyboardInterrupt:
-                break
+            time.sleep(self.loop_interval)
 
     def handle_search(self, now, last):
         '''
@@ -289,7 +319,7 @@ class Maintenance(MultiprocessingProcess):
         '''
         Fire presence events if enabled
         '''
-        if self.opts.get('presence_events', False):
+        if self.presence_events:
             present = self.ckminions.connected_ids()
             new = present.difference(old_present)
             lost = old_present.difference(present)
@@ -299,7 +329,9 @@ class Maintenance(MultiprocessingProcess):
                         'lost': list(lost)}
                 self.event.fire_event(data, tagify('change', 'presence'))
             data = {'present': list(present)}
-            self.event.fire_event(data, tagify('present', 'presence'))
+            # On the first run it may need more time for the EventPublisher
+            # to come up and be ready. Set the timeout to account for this.
+            self.event.fire_event(data, tagify('present', 'presence'), timeout=3)
             old_present.clear()
             old_present.update(present)
 
@@ -314,22 +346,23 @@ class Master(SMaster):
 
         :param dict: The salt options
         '''
-        # Warn if ZMQ < 3.2
-        try:
-            zmq_version_info = zmq.zmq_version_info()
-        except AttributeError:
-            # PyZMQ <= 2.1.9 does not have zmq_version_info, fall back to
-            # using zmq.zmq_version() and build a version info tuple.
-            zmq_version_info = tuple(
-                [int(x) for x in zmq.zmq_version().split('.')]
-            )
-        if zmq_version_info < (3, 2):
-            log.warning(
-                'You have a version of ZMQ less than ZMQ 3.2! There are '
-                'known connection keep-alive issues with ZMQ < 3.2 which '
-                'may result in loss of contact with minions. Please '
-                'upgrade your ZMQ!'
-            )
+        if HAS_ZMQ:
+            # Warn if ZMQ < 3.2
+            try:
+                zmq_version_info = zmq.zmq_version_info()
+            except AttributeError:
+                # PyZMQ <= 2.1.9 does not have zmq_version_info, fall back to
+                # using zmq.zmq_version() and build a version info tuple.
+                zmq_version_info = tuple(
+                    [int(x) for x in zmq.zmq_version().split('.')]
+                )
+            if zmq_version_info < (3, 2):
+                log.warning(
+                    'You have a version of ZMQ less than ZMQ 3.2! There are '
+                    'known connection keep-alive issues with ZMQ < 3.2 which '
+                    'may result in loss of contact with minions. Please '
+                    'upgrade your ZMQ!'
+                )
         SMaster.__init__(self, opts)
 
     def __set_max_open_files(self):
@@ -439,12 +472,17 @@ class Master(SMaster):
     # run_reqserver cannot be defined within a class method in order for it
     # to be picklable.
     def run_reqserver(self, **kwargs):
-        reqserv = ReqServer(
-            self.opts,
-            self.key,
-            self.master_key,
-            **kwargs)
-        reqserv.run()
+        secrets = kwargs.pop('secrets', None)
+        if secrets is not None:
+            SMaster.secrets = secrets
+
+        with default_signals(signal.SIGINT, signal.SIGTERM):
+            reqserv = ReqServer(
+                self.opts,
+                self.key,
+                self.master_key,
+                **kwargs)
+            reqserv.run()
 
     def start(self):
         '''
@@ -462,85 +500,85 @@ class Master(SMaster):
 
         self.__set_max_open_files()
 
-        # Before creating and adding processes to the process manager, store
-        # references to the SIGTERM/SIGINT signal handlers and restore the
-        # default handlers. We don't want the processes being started to
-        # inherit those signal handlers
-        old_sigint_handler = signal.getsignal(signal.SIGINT)
-        old_sigterm_handler = signal.getsignal(signal.SIGTERM)
-        signal.signal(signal.SIGINT, signal.SIG_DFL)
-        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        # Reset signals to default ones before adding processes to the process
+        # manager. We don't want the processes being started to inherit those
+        # signal handlers
+        with default_signals(signal.SIGINT, signal.SIGTERM):
 
-        log.info('Creating master process manager')
-        self.process_manager = salt.utils.process.ProcessManager()
-        log.info('Creating master maintenance process')
-        pub_channels = []
-        for transport, opts in iter_transport_opts(self.opts):
-            chan = salt.transport.server.PubServerChannel.factory(opts)
-            chan.pre_fork(self.process_manager)
-            pub_channels.append(chan)
+            # Setup the secrets here because the PubServerChannel may need
+            # them as well.
+            SMaster.secrets['aes'] = {'secret': multiprocessing.Array(ctypes.c_char,
+                                                salt.crypt.Crypticle.generate_key_string()),
+                                      'reload': salt.crypt.Crypticle.generate_key_string
+                                     }
+            log.info('Creating master process manager')
+            self.process_manager = salt.utils.process.ProcessManager()
+            pub_channels = []
+            log.info('Creating master publisher process')
+            for transport, opts in iter_transport_opts(self.opts):
+                chan = salt.transport.server.PubServerChannel.factory(opts)
+                chan.pre_fork(self.process_manager)
+                pub_channels.append(chan)
 
-        log.info('Creating master event publisher process')
-        self.process_manager.add_process(salt.utils.event.EventPublisher, args=(self.opts,))
-        salt.engines.start_engines(self.opts, self.process_manager)
+            log.info('Creating master event publisher process')
+            self.process_manager.add_process(salt.utils.event.EventPublisher, args=(self.opts,))
+            salt.engines.start_engines(self.opts, self.process_manager)
 
-        # must be after channels
-        self.process_manager.add_process(Maintenance, args=(self.opts,))
-        log.info('Creating master publisher process')
+            # must be after channels
+            log.info('Creating master maintenance process')
+            self.process_manager.add_process(Maintenance, args=(self.opts,))
 
-        if 'reactor' in self.opts:
-            log.info('Creating master reactor process')
-            self.process_manager.add_process(salt.utils.reactor.Reactor, args=(self.opts,))
+            if 'reactor' in self.opts:
+                log.info('Creating master reactor process')
+                self.process_manager.add_process(salt.utils.reactor.Reactor, args=(self.opts,))
 
-        if self.opts.get('event_return'):
-            log.info('Creating master event return process')
-            self.process_manager.add_process(salt.utils.event.EventReturn, args=(self.opts,))
+            if self.opts.get('event_return'):
+                log.info('Creating master event return process')
+                self.process_manager.add_process(salt.utils.event.EventReturn, args=(self.opts,))
 
-        ext_procs = self.opts.get('ext_processes', [])
-        for proc in ext_procs:
-            log.info('Creating ext_processes process: {0}'.format(proc))
-            try:
-                mod = '.'.join(proc.split('.')[:-1])
-                cls = proc.split('.')[-1]
-                _tmp = __import__(mod, globals(), locals(), [cls], -1)
-                cls = _tmp.__getattribute__(cls)
-                self.process_manager.add_process(cls, args=(self.opts,))
-            except Exception:
-                log.error(('Error creating ext_processes '
-                           'process: {0}').format(proc))
+            ext_procs = self.opts.get('ext_processes', [])
+            for proc in ext_procs:
+                log.info('Creating ext_processes process: {0}'.format(proc))
+                try:
+                    mod = '.'.join(proc.split('.')[:-1])
+                    cls = proc.split('.')[-1]
+                    _tmp = __import__(mod, globals(), locals(), [cls], -1)
+                    cls = _tmp.__getattribute__(cls)
+                    self.process_manager.add_process(cls, args=(self.opts,))
+                except Exception:
+                    log.error(('Error creating ext_processes '
+                            'process: {0}').format(proc))
 
-        if HAS_HALITE and 'halite' in self.opts:
-            log.info('Creating master halite process')
-            self.process_manager.add_process(Halite, args=(self.opts['halite'],))
+            if HAS_HALITE and 'halite' in self.opts:
+                log.info('Creating master halite process')
+                self.process_manager.add_process(Halite, args=(self.opts['halite'],))
 
-        # TODO: remove, or at least push into the transport stuff (pre-fork probably makes sense there)
-        if self.opts['con_cache']:
-            log.info('Creating master concache process')
-            self.process_manager.add_process(ConnectedCache, args=(self.opts,))
-            # workaround for issue #16315, race condition
-            log.debug('Sleeping for two seconds to let concache rest')
-            time.sleep(2)
+            # TODO: remove, or at least push into the transport stuff (pre-fork probably makes sense there)
+            if self.opts['con_cache']:
+                log.info('Creating master concache process')
+                self.process_manager.add_process(ConnectedCache, args=(self.opts,))
+                # workaround for issue #16315, race condition
+                log.debug('Sleeping for two seconds to let concache rest')
+                time.sleep(2)
 
         log.info('Creating master request server process')
         kwargs = {}
         if salt.utils.is_windows():
-            kwargs['log_queue'] = (
-                    salt.log.setup.get_multiprocessing_logging_queue())
-        self.process_manager.add_process(self.run_reqserver, kwargs=kwargs)
+            kwargs['log_queue'] = salt.log.setup.get_multiprocessing_logging_queue()
+            kwargs['secrets'] = SMaster.secrets
 
-        # Restore the old SIGTERM/SIGINT handler now that all processes have
-        # been added to the process manager
-        if old_sigint_handler is signal.SIG_DFL:
+        # No need to call this one under default_signals because that's invoked when
+        # actually starting the ReqServer
+        self.process_manager.add_process(self.run_reqserver, kwargs=kwargs, name='ReqServer')
+
+        # Install the SIGINT/SIGTERM handlers if not done so far
+        if signal.getsignal(signal.SIGINT) is signal.SIG_DFL:
             # No custom signal handling was added, install our own
             signal.signal(signal.SIGINT, self._handle_signals)
-        else:
-            signal.signal(signal.SIGINT, old_sigint_handler)
 
-        if old_sigterm_handler is signal.SIG_DFL:
+        if signal.getsignal(signal.SIGTERM) is signal.SIG_DFL:
             # No custom signal handling was added, install our own
             signal.signal(signal.SIGINT, self._handle_signals)
-        else:
-            signal.signal(signal.SIGTERM, old_sigterm_handler)
 
         self.process_manager.run()
 
@@ -552,18 +590,29 @@ class Master(SMaster):
         self.process_manager.kill_children()
 
 
-class Halite(MultiprocessingProcess):
+class Halite(SignalHandlingMultiprocessingProcess):
     '''
     Manage the Halite server
     '''
-    def __init__(self, hopts, **kwargs):
+    def __init__(self, hopts, log_queue=None):
         '''
         Create a halite instance
 
         :param dict hopts: The halite options
         '''
-        super(Halite, self).__init__(**kwargs)
+        super(Halite, self).__init__(log_queue=log_queue)
         self.hopts = hopts
+
+    # __setstate__ and __getstate__ are only used on Windows.
+    # We do this so that __init__ will be invoked on Windows in the child
+    # process so that a register_after_fork() equivalent will work on Windows.
+    def __setstate__(self, state):
+        self._is_child = True
+        self.__init__(state['hopts'], log_queue=state['log_queue'])
+
+    def __getstate__(self):
+        return {'hopts': self.hopts,
+                'log_queue': self.log_queue}
 
     def run(self):
         '''
@@ -573,25 +622,7 @@ class Halite(MultiprocessingProcess):
         halite.start(self.hopts)
 
 
-# TODO: move to utils??
-def iter_transport_opts(opts):
-    '''
-    Yield transport, opts for all master configured transports
-    '''
-    transports = set()
-
-    for transport, opts_overrides in six.iteritems(opts.get('transport_opts', {})):
-        t_opts = dict(opts)
-        t_opts.update(opts_overrides)
-        t_opts['transport'] = transport
-        transports.add(transport)
-        yield transport, t_opts
-
-    if opts['transport'] not in transports:
-        yield opts['transport'], opts
-
-
-class ReqServer(object):
+class ReqServer(SignalHandlingMultiprocessingProcess):
     '''
     Starts up the master request server, minions send results to this
     interface.
@@ -607,22 +638,31 @@ class ReqServer(object):
         :rtype: ReqServer
         :returns: Request server
         '''
+        super(ReqServer, self).__init__(log_queue=log_queue)
         self.opts = opts
         self.master_key = mkey
         # Prepare the AES key
         self.key = key
-        self.log_queue = log_queue
+
+    def _handle_signals(self, signum, sigframe):  # pylint: disable=unused-argument
+        self.destroy(signum)
+        super(ReqServer, self)._handle_signals(signum, sigframe)
 
     def __bind(self):
         '''
         Binds the reply server
         '''
+        if self.log_queue is not None:
+            salt.log.setup.set_multiprocessing_logging_queue(self.log_queue)
+        salt.log.setup.setup_multiprocessing_logging(self.log_queue)
+
         dfn = os.path.join(self.opts['cachedir'], '.dfn')
         if os.path.isfile(dfn):
             try:
                 os.remove(dfn)
             except os.error:
                 pass
+
         self.process_manager = salt.utils.process.ProcessManager(name='ReqServer_ProcessManager')
 
         req_channels = []
@@ -643,47 +683,47 @@ class ReqServer(object):
                 self.opts['worker_threads'] = 1
 
         for ind in range(int(self.opts['worker_threads'])):
+            name = 'MWorker-{0}'.format(ind)
             self.process_manager.add_process(MWorker,
-                                             args=(self.opts,
-                                                   self.master_key,
-                                                   self.key,
-                                                   req_channels,
-                                                   ),
-                                             kwargs=kwargs
-                                             )
-        try:
-            self.process_manager.run()
-        except (KeyboardInterrupt, SystemExit):
-            self.process_manager.kill_children()
+                                            args=(self.opts,
+                                                self.master_key,
+                                                self.key,
+                                                req_channels,
+                                                name
+                                                ),
+                                            kwargs=kwargs,
+                                            name=name
+                                            )
+        self.process_manager.run()
 
     def run(self):
         '''
         Start up the ReqServer
         '''
-        try:
-            self.__bind()
-        except KeyboardInterrupt:
-            log.warn('Stopping the Salt Maste ReqServer')
-            raise SystemExit('\nExiting on Ctrl-c')
+        self.__bind()
 
-    def destroy(self):
+    def destroy(self, signum=signal.SIGTERM):
         if hasattr(self, 'clients') and self.clients.closed is False:
-            self.clients.setsockopt(zmq.LINGER, 1)
+            if HAS_ZMQ:
+                self.clients.setsockopt(zmq.LINGER, 1)
             self.clients.close()
         if hasattr(self, 'workers') and self.workers.closed is False:
-            self.workers.setsockopt(zmq.LINGER, 1)
+            if HAS_ZMQ:
+                self.workers.setsockopt(zmq.LINGER, 1)
             self.workers.close()
         if hasattr(self, 'context') and self.context.closed is False:
             self.context.term()
         # Also stop the workers
         if hasattr(self, 'process_manager'):
+            self.process_manager.stop_restarting()
+            self.process_manager.send_signal_to_processes(signum)
             self.process_manager.kill_children()
 
     def __del__(self):
         self.destroy()
 
 
-class MWorker(MultiprocessingProcess):
+class MWorker(SignalHandlingMultiprocessingProcess):
     '''
     The worker multiprocess instance to manage the backend operations for the
     salt master.
@@ -693,6 +733,7 @@ class MWorker(MultiprocessingProcess):
                  mkey,
                  key,
                  req_channels,
+                 name,
                  **kwargs):
         '''
         Create a salt master worker process
@@ -704,7 +745,8 @@ class MWorker(MultiprocessingProcess):
         :rtype: MWorker
         :return: Master worker
         '''
-        MultiprocessingProcess.__init__(self, **kwargs)
+        kwargs['name'] = name
+        SignalHandlingMultiprocessingProcess.__init__(self, **kwargs)
         self.opts = opts
         self.req_channels = req_channels
 
@@ -718,7 +760,8 @@ class MWorker(MultiprocessingProcess):
     # These methods are only used when pickling so will not be used on
     # non-Windows platforms.
     def __setstate__(self, state):
-        MultiprocessingProcess.__init__(self, log_queue=state['log_queue'])
+        self._is_child = True
+        SignalHandlingMultiprocessingProcess.__init__(self, log_queue=state['log_queue'])
         self.opts = state['opts']
         self.req_channels = state['req_channels']
         self.mkey = state['mkey']
@@ -735,19 +778,22 @@ class MWorker(MultiprocessingProcess):
                 'log_queue': self.log_queue,
                 'secrets': SMaster.secrets}
 
+    def _handle_signals(self, signum, sigframe):
+        for channel in getattr(self, 'req_channels', ()):
+            channel.close()
+        super(MWorker, self)._handle_signals(signum, sigframe)
+
     def __bind(self):
         '''
         Bind to the local port
         '''
         # using ZMQIOLoop since we *might* need zmq in there
-        zmq.eventloop.ioloop.install()
-        self.io_loop = zmq.eventloop.ioloop.ZMQIOLoop()
+        if HAS_ZMQ:
+            zmq.eventloop.ioloop.install()
+        self.io_loop = LOOP_CLASS()
         for req_channel in self.req_channels:
             req_channel.post_fork(self._handle_payload, io_loop=self.io_loop)  # TODO: cleaner? Maybe lazily?
-        try:
-            self.io_loop.start()
-        except KeyboardInterrupt:
-            self.io_loop.add_callback(self.io_loop.stop)
+        self.io_loop.start()
 
     @tornado.gen.coroutine
     def _handle_payload(self, payload):
@@ -810,7 +856,7 @@ class MWorker(MultiprocessingProcess):
         '''
         Start a Master Worker
         '''
-        salt.utils.appendproctitle(self.__class__.__name__)
+        salt.utils.appendproctitle(self.name)
         self.clear_funcs = ClearFuncs(
             self.opts,
             self.key,
@@ -902,6 +948,19 @@ class AESFuncs(object):
                   .format(id_))
         return False
 
+    def verify_minion(self, id_, token):
+        '''
+        Take a minion id and a string signed with the minion private key
+        The string needs to verify as 'salt' with the minion public key
+
+        :param str id_: A minion ID
+        :param str token: A string signed with the minion private key
+
+        :rtype: bool
+        :return: Boolean indicating whether or not the token can be verified.
+        '''
+        return self.__verify_minion(id_, token)
+
     def __verify_minion_publish(self, clear_load):
         '''
         Verify that the passed information authorized a minion to execute
@@ -951,6 +1010,7 @@ class AESFuncs(object):
         return self.ckminions.auth_check(
             perms,
             clear_load['fun'],
+            clear_load['arg'],
             clear_load['tgt'],
             clear_load.get('tgt_type', 'glob'),
             publish_validate=True)
@@ -1273,8 +1333,8 @@ class AESFuncs(object):
             path_name = os.path.split(syndic_cache_path)[0]
             if not os.path.exists(path_name):
                 os.makedirs(path_name)
-            with salt.utils.fopen(syndic_cache_path, 'w') as f:
-                f.write('')
+            with salt.utils.fopen(syndic_cache_path, 'w') as wfh:
+                wfh.write('')
 
         # Format individual return loads
         for key, item in six.iteritems(load['return']):
@@ -1873,6 +1933,7 @@ class ClearFuncs(object):
             good = self.ckminions.auth_check(
                 auth_list,
                 clear_load['fun'],
+                clear_load['arg'],
                 clear_load['tgt'],
                 clear_load.get('tgt_type', 'glob'))
             if not good:
@@ -1910,9 +1971,10 @@ class ClearFuncs(object):
                 # in the configuration file.
 
                 external_auth_in_db = False
-                for d in self.opts['external_auth'][extra['eauth']]:
-                    if d.startswith('^'):
+                for entry in self.opts['external_auth'][extra['eauth']]:
+                    if entry.startswith('^'):
                         external_auth_in_db = True
+                        break
 
                 # If neither a catchall, a named membership or a group
                 # membership is found, there is no need to continue. Simply
@@ -1952,14 +2014,20 @@ class ClearFuncs(object):
             # what the user has access to.
 
             auth_list = []
+            if '*' in self.opts['external_auth'][extra['eauth']]:
+                auth_list.extend(self.opts['external_auth'][extra['eauth']]['*'])
             if name in self.opts['external_auth'][extra['eauth']]:
                 auth_list = self.opts['external_auth'][extra['eauth']][name]
             if group_auth_match:
-                auth_list = self.ckminions.fill_auth_list_from_groups(self.opts['external_auth'][extra['eauth']], groups, auth_list)
+                auth_list = self.ckminions.fill_auth_list_from_groups(
+                        self.opts['external_auth'][extra['eauth']],
+                        groups,
+                        auth_list)
 
             good = self.ckminions.auth_check(
                 auth_list,
                 clear_load['fun'],
+                clear_load['arg'],
                 clear_load['tgt'],
                 clear_load.get('tgt_type', 'glob')
                 )
@@ -1988,6 +2056,7 @@ class ClearFuncs(object):
                     good = self.ckminions.auth_check(
                                 publisher_acl.get(clear_load['user'].split('_', 1)[-1]),
                                 clear_load['fun'],
+                                clear_load['arg'],
                                 clear_load['tgt'],
                                 clear_load.get('tgt_type', 'glob'))
                     if not good:
@@ -2029,6 +2098,7 @@ class ClearFuncs(object):
                     good = self.ckminions.auth_check(
                         acl[clear_load['user']],
                         clear_load['fun'],
+                        clear_load['arg'],
                         clear_load['tgt'],
                         clear_load.get('tgt_type', 'glob'))
                     if not good:

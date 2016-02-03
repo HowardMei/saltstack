@@ -9,9 +9,11 @@ Manage Dell DRAC.
 # Import python libs
 from __future__ import absolute_import
 import logging
+import os
 import re
 
 # Import Salt libs
+from salt.exceptions import CommandExecutionError
 import salt.utils
 
 # Import 3rd-party libs
@@ -21,12 +23,22 @@ from salt.ext.six.moves import map
 
 log = logging.getLogger(__name__)
 
+__proxyenabled__ = ['fx2']
+
+try:
+    run_all = __salt__['cmd.run_all']
+except NameError:
+    import salt.modules.cmdmod
+    __salt__ = {
+        'cmd.run_all': salt.modules.cmdmod._run_all_quiet
+    }
+
 
 def __virtual__():
     if salt.utils.which('racadm'):
         return True
 
-    return False
+    return (False, 'The drac execution module cannot be loaded: racadm binary not in path.')
 
 
 def __parse_drac(output):
@@ -37,13 +49,16 @@ def __parse_drac(output):
     section = ''
 
     for i in output.splitlines():
+        if i.strip().endswith(':') and '=' not in i:
+            section = i[0:-1]
+            drac[section] = {}
         if len(i.rstrip()) > 0 and '=' in i:
             if section in drac:
                 drac[section].update(dict(
                     [[prop.strip() for prop in i.split('=')]]
                 ))
             else:
-                section = i.strip()[1:-1]
+                section = i.strip()
                 if section not in drac and section:
                     drac[section] = {}
 
@@ -77,7 +92,8 @@ def __execute_cmd(command, host=None,
                                                          admin_username,
                                                          admin_password,
                                                          command,
-                                                         modswitch))
+                                                         modswitch),
+        output_loglevel='quiet')
 
     if cmd['retcode'] != 0:
         log.warning('racadm return an exit code \'{0}\'.'
@@ -110,7 +126,8 @@ def __execute_ret(command, host=None,
                                                          admin_username,
                                                          admin_password,
                                                          command,
-                                                         modswitch))
+                                                         modswitch),
+        output_loglevel='quiet')
 
     if cmd['retcode'] != 0:
         log.warning('racadm return an exit code \'{0}\'.'
@@ -127,7 +144,6 @@ def __execute_ret(command, host=None,
             fmtlines.append(l)
             if '=' in l:
                 continue
-            break
         cmd['stdout'] = '\n'.join(fmtlines)
 
     return cmd
@@ -135,8 +151,6 @@ def __execute_ret(command, host=None,
 
 def get_dns_dracname(host=None,
                      admin_username=None, admin_password=None):
-    import pydevd
-    pydevd.settrace('172.16.207.1', port=65500, stdoutToServer=True, stderrToServer=True)
 
     ret = __execute_ret('get iDRAC.NIC.DNSRacName', host=host,
                         admin_username=admin_username,
@@ -235,6 +249,12 @@ def network_info(host=None,
 
     inv = inventory(host=host, admin_username=admin_username,
                     admin_password=admin_password)
+    if inv is None:
+        cmd = {}
+        cmd['retcode'] = -1
+        cmd['stdout'] = 'Problem getting switch inventory'
+        return cmd
+
     if module not in inv.get('switch'):
         cmd = {}
         cmd['retcode'] = -1
@@ -443,7 +463,11 @@ def change_password(username, password, uid=None, host=None,
     be necessary if one is not sure which user slot contains the one you want.
     Many late-model Dell chassis have 'root' as UID 1, so if you can depend
     on that then setting the password is much quicker.
+    Raises an error if the supplied password is greater than 20 chars.
     '''
+    if len(password) > 20:
+        raise CommandExecutionError('Supplied password should be 20 characters or less')
+
     if uid is None:
         user = list_users(host=host, admin_username=admin_username,
                           admin_password=admin_password, module=module)
@@ -976,7 +1000,10 @@ def get_slotname(slot, host=None, admin_username=None, admin_password=None):
     '''
     slots = list_slotnames(host=host, admin_username=admin_username,
                            admin_password=admin_password)
-    return slots[slot]
+    # The keys for this dictionary are strings, not integers, so convert the
+    # argument to a string
+    slot = str(slot)
+    return slots[slot]['slotname']
 
 
 def set_slotname(slot, name, host=None,
@@ -1065,9 +1092,9 @@ def get_chassis_name(host=None, admin_username=None, admin_password=None):
             admin_username=root admin_password=secret
 
     '''
-    return system_info(host=host, admin_username=admin_username,
-                       admin_password=
-                       admin_password)['Chassis Information']['Chassis Name']
+    return bare_rac_cmd('getchassisname', host=host,
+                        admin_username=admin_username,
+                        admin_password=admin_password)
 
 
 def inventory(host=None, admin_username=None, admin_password=None):
@@ -1290,3 +1317,111 @@ def get_general(cfg_sec, cfg_var, host=None,
         return ret['stdout']
     else:
         return ret
+
+
+def _update_firmware(cmd,
+                     host=None,
+                     admin_username=None,
+                     admin_password=None):
+
+    if not admin_username:
+        admin_username = __pillar__['proxy']['admin_username']
+    if not admin_username:
+        admin_password = __pillar__['proxy']['admin_password']
+
+    ret = __execute_ret(cmd,
+                        host=host,
+                        admin_username=admin_username,
+                        admin_password=admin_password)
+
+    if ret['retcode'] == 0:
+        return ret['stdout']
+    else:
+        return ret
+
+
+def bare_rac_cmd(cmd, host=None,
+                admin_username=None, admin_password=None):
+    ret = __execute_ret('{0}'.format(cmd),
+                        host=host,
+                        admin_username=admin_username,
+                        admin_password=admin_password)
+
+    if ret['retcode'] == 0:
+        return ret['stdout']
+    else:
+        return ret
+
+
+def update_firmware(filename,
+                    host=None,
+                    admin_username=None,
+                    admin_password=None):
+    '''
+    Updates firmware using local firmware file
+
+    .. code-block:: bash
+
+         salt dell dracr.update_firmware firmware.exe
+
+    This executes the following command on your FX2
+    (using username and password stored in the pillar data)
+
+    .. code-block:: bash
+
+         racadm update –f firmware.exe -u user –p pass
+
+    '''
+    if os.path.exists(filename):
+        return _update_firmware('update -f {0}'.format(filename),
+                                host=None,
+                                admin_username=None,
+                                admin_password=None)
+    else:
+        raise CommandExecutionError('Unable to find firmware file {0}'
+                                    .format(filename))
+
+
+def update_firmware_nfs_or_cifs(filename, share,
+                                host=None,
+                                admin_username=None,
+                                admin_password=None):
+    '''
+    Executes the following for CIFS
+    (using username and password stored in the pillar data)
+
+    .. code-block:: bash
+
+         racadm update -f <updatefile> -u user –p pass -l //IP-Address/share
+
+    Or for NFS
+    (using username and password stored in the pillar data)
+
+    .. code-block:: bash
+
+          racadm update -f <updatefile> -u user –p pass -l IP-address:/share
+
+
+    Salt command for CIFS:
+
+    .. code-block:: bash
+
+         salt dell dracr.update_firmware_nfs_or_cifs \
+         firmware.exe //IP-Address/share
+
+
+    Salt command for NFS:
+
+    .. code-block:: bash
+
+         salt dell dracr.update_firmware_nfs_or_cifs \
+         firmware.exe IP-address:/share
+    '''
+    if os.path.exists(filename):
+        return _update_firmware('update -f {0} -l {1}'.format(filename, share),
+                                host=None,
+                                admin_username=None,
+                                admin_password=None)
+    else:
+        raise CommandExecutionError('Unable to find firmware file {0}'
+                                    .format(filename))

@@ -303,12 +303,12 @@ Set up an initial profile at ``/etc/salt/cloud.profiles``:
           SubnetId: subnet-813d4bbf
           SecurityGroupId:
             - sg-750af413
+      del_root_vol_on_destroy: True
+      del_all_vol_on_destroy: True
       volumes:
         - { size: 10, device: /dev/sdf }
         - { size: 10, device: /dev/sdg, type: io1, iops: 1000 }
         - { size: 10, device: /dev/sdh, type: io1, iops: 1000 }
-      del_root_vol_on_destroy: True
-      del_all_vol_on_destroy: True
       tag: {'Environment': 'production', 'Role': 'database'}
       sync_after_install: grains
 
@@ -353,6 +353,16 @@ The following settings are always required for EC2:
 
 Optional Settings
 =================
+
+EC2 allows a userdata file to be passed to the instance to be created. This
+functionality was added to Salt in the 2015.5.0 release.
+
+.. code-block:: yaml
+
+    my-ec2-config:
+      # Pass userdata to the instance to be created
+      userdata_file: /etc/salt/my-userdata-file
+
 
 EC2 allows a location to be set for servers to be deployed in. Availability
 zones exist inside regions, and may be added to increase specificity.
@@ -490,6 +500,10 @@ its size to 100G by using the following configuration.
           Ebs.VolumeSize: 100
           Ebs.VolumeType: gp2
           Ebs.SnapshotId: dummy0
+        - DeviceName: /dev/sdb
+          # required for devices > 2TB
+          Ebs.VolumeType: gp2
+          Ebs.VolumeSize: 3001
 
 Existing EBS volumes may also be attached (not created) to your instances or
 you can create new EBS volumes based on EBS snapshots. To simply attach an
@@ -827,12 +841,20 @@ A size or a snapshot may be specified (in GiB). If neither is given, a default
 size of 10 GiB will be used. If a snapshot is given, the size of the snapshot
 will be used.
 
+The following parameters may also be set (when providing a snapshot OR size):
+
+* ``type``: choose between standard (magnetic disk), gp2 (SSD), or io1 (provisioned IOPS).
+  (default=standard)
+* ``iops``: the number of IOPS (only applicable to io1 volumes) (default varies on volume size)
+* ``encrypted``: enable encryption on the volume (default=false)
+
 .. code-block:: bash
 
     salt-cloud -f create_volume ec2 zone=us-east-1b
     salt-cloud -f create_volume ec2 zone=us-east-1b size=10
     salt-cloud -f create_volume ec2 zone=us-east-1b snapshot=snap12345678
     salt-cloud -f create_volume ec2 size=10 type=standard
+    salt-cloud -f create_volume ec2 size=10 type=gp2
     salt-cloud -f create_volume ec2 size=10 type=io1 iops=1000
 
 
@@ -891,7 +913,7 @@ point, and should be stored immediately.
     salt-cloud -f create_keypair ec2 keyname=mykeypair
 
 Importing a Key Pair
--------------------
+--------------------
 
 .. code-block:: bash
 

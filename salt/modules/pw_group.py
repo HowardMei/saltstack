@@ -25,9 +25,12 @@ __virtualname__ = 'group'
 
 def __virtual__():
     '''
-    Set the user module if the kernel is Linux
+    Set the user module if the kernel is FreeBSD or Dragonfly
     '''
-    return __virtualname__ if __grains__['kernel'] == 'FreeBSD' else False
+    if __grains__['kernel'] in ('FreeBSD', 'DragonFly'):
+        return __virtualname__
+    return (False, 'The pw_group execution module cannot be loaded: '
+            'system is not supported.')
 
 
 def add(name, gid=None, **kwargs):

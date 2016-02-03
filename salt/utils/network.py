@@ -7,7 +7,6 @@ Define some generic socket functions for network modules
 from __future__ import absolute_import
 import os
 import re
-import shlex
 import socket
 import logging
 from string import ascii_letters, digits
@@ -43,12 +42,6 @@ def sanitize_host(host):
 def isportopen(host, port):
     '''
     Return status of a port
-
-    CLI Example:
-
-    .. code-block:: bash
-
-        salt '*' network.isportopen 127.0.0.1 22
     '''
 
     if not 1 <= int(port) <= 65535:
@@ -63,12 +56,6 @@ def isportopen(host, port):
 def host_to_ip(host):
     '''
     Returns the IP address of a given hostname
-
-    CLI Example:
-
-    .. code-block:: bash
-
-        salt '*' network.host_to_ip example.com
     '''
     try:
         family, socktype, proto, canonname, sockaddr = socket.getaddrinfo(
@@ -267,12 +254,6 @@ def generate_minion_id():
     '''
     Returns a minion id after checking multiple sources for a FQDN.
     If no FQDN is found you may get an ip address
-
-    CLI Example:
-
-    .. code-block:: bash
-
-        salt '*' network.generate_minion_id
     '''
     possible_ids = get_hostnames()
 
@@ -310,12 +291,6 @@ def get_socket(addr, type=socket.SOCK_STREAM, proto=0):
 def get_fqhostname():
     '''
     Returns the fully qualified hostname
-
-    CLI Example:
-
-    .. code-block:: bash
-
-        salt '*' network.get_fqhostname
     '''
     l = []
     l.append(socket.getfqdn())
@@ -343,12 +318,6 @@ def get_fqhostname():
 def ip_to_host(ip):
     '''
     Returns the hostname of a given IP
-
-    CLI Example:
-
-    .. code-block:: bash
-
-        salt '*' network.ip_to_host 8.8.8.8
     '''
     try:
         hostname, aliaslist, ipaddrlist = socket.gethostbyaddr(ip)
@@ -563,7 +532,7 @@ def _interfaces_ifconfig(out):
         pip6 = re.compile('.*?(?:inet6 )([0-9a-fA-F:]+)')
         pmask6 = re.compile(r'.*?(?:inet6 [0-9a-fA-F:]+/(\d+)).*')
     else:
-        pip = re.compile(r'.*?(?:inet addr:|inet )(.*?)\s')
+        pip = re.compile(r'.*?(?:inet addr:|inet [^\d]*)(.*?)\s')
         pip6 = re.compile('.*?(?:inet6 addr: (.*?)/|inet6 )([0-9a-fA-F:]+)')
         pmask6 = re.compile(r'.*?(?:inet6 addr: [0-9a-fA-F:]+/(\d+)|prefixlen (\d+))(?: Scope:([a-zA-Z]+)| scopeid (0x[0-9a-fA-F]))?')
     pmask = re.compile(r'.*?(?:Mask:|netmask )(?:((?:0x)?[0-9a-fA-F]{8})|([\d\.]+))')
@@ -615,7 +584,8 @@ def _interfaces_ifconfig(out):
                     if not salt.utils.is_sunos():
                         ipv6scope = mmask6.group(3) or mmask6.group(4)
                         addr_obj['scope'] = ipv6scope.lower() if ipv6scope is not None else ipv6scope
-                data['inet6'].append(addr_obj)
+                if addr_obj['address'] != '::' and addr_obj['prefixlen'] != 0:  # SunOS sometimes has ::/0 as inet6 addr when using addrconf
+                    data['inet6'].append(addr_obj)
         data['up'] = updown
         if iface in ret:
             # SunOS optimization, where interfaces occur twice in 'ifconfig -a'
@@ -926,6 +896,7 @@ def in_subnet(cidr, addr=None):
 
     if addr is None:
         addr = ip_addrs()
+        addr.extend(ip_addrs6())
     elif isinstance(addr, six.string_types):
         return ipaddress.ip_address(addr) in cidr
 
@@ -1173,7 +1144,7 @@ def _freebsd_remotes_on(port, which_end):
     remotes = set()
 
     try:
-        cmd = shlex.split('sockstat -4 -c -p {0}'.format(port))
+        cmd = salt.utils.shlex_split('sockstat -4 -c -p {0}'.format(port))
         data = subprocess.check_output(cmd)  # pylint: disable=minimum-python-version
     except subprocess.CalledProcessError as ex:
         log.error('Failed "sockstat" with returncode = {0}'.format(ex.returncode))

@@ -134,7 +134,8 @@ def __virtual__():
                 return __virtualname__
         else:
             log.critical('Minimum version of docker-compose>=1.5.0')
-    return False
+    return (False, 'The dockercompose execution module not loaded: '
+            'compose python library not available.')
 
 
 def __standardize_result(status, message, data=None, debug_msg=None):
@@ -279,7 +280,16 @@ def get(path):
 
         salt myminion dockercompose.get /path/where/docker-compose/stored
     '''
-    return __read_docker_compose(path)
+
+    salt_result = __read_docker_compose(path)
+    if not salt_result['status']:
+        return salt_result
+    project = __load_project(path)
+    if isinstance(project, dict):
+        salt_result['return']['valid'] = False
+    else:
+        salt_result['return']['valid'] = True
+    return salt_result
 
 
 def create(path, docker_compose):

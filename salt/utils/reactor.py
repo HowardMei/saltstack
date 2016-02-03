@@ -4,7 +4,6 @@ from __future__ import absolute_import
 # Import python libs
 import fnmatch
 import glob
-import signal
 import logging
 
 import yaml
@@ -22,29 +21,34 @@ from salt._compat import string_types
 log = logging.getLogger(__name__)
 
 
-class Reactor(salt.utils.process.MultiprocessingProcess, salt.state.Compiler):
+class Reactor(salt.utils.process.SignalHandlingMultiprocessingProcess, salt.state.Compiler):
     '''
     Read in the reactor configuration variable and compare it to events
     processed on the master.
     The reactor has the capability to execute pre-programmed executions
     as reactions to events
     '''
-    def __init__(self, opts):
-        salt.utils.process.MultiprocessingProcess.__init__(self)
+    def __init__(self, opts, log_queue=None):
+        super(Reactor, self).__init__(log_queue=log_queue)
         local_minion_opts = opts.copy()
         local_minion_opts['file_client'] = 'local'
         self.minion = salt.minion.MasterMinion(local_minion_opts)
         salt.state.Compiler.__init__(self, opts, self.minion.rend)
 
-    def sig_stop(self, signum, frame):
-        msg = 'Received a '
-        if signum == signal.SIGINT:
-            msg += 'SIGINT'
-        elif signum == signal.SIGTERM:
-            msg += 'SIGTERM'
-        msg += '. Exiting {0}.'.format(self.__class__.__name__)
-        log.info(msg)
-        exit(salt.defaults.exitcodes.EX_GENERIC)
+    # We need __setstate__ and __getstate__ to avoid pickling errors since
+    # 'self.rend' (from salt.state.Compiler) contains a function reference
+    # which is not picklable.
+    # These methods are only used when pickling so will not be used on
+    # non-Windows platforms.
+    def __setstate__(self, state):
+        self._is_child = True
+        Reactor.__init__(
+            self, state['opts'],
+            log_queue=state['log_queue'])
+
+    def __getstate__(self):
+        return {'opts': self.opts,
+                'log_queue': self.log_queue}
 
     def render_reaction(self, glob_ref, tag, data):
         '''
@@ -197,10 +201,6 @@ class Reactor(salt.utils.process.MultiprocessingProcess, salt.state.Compiler):
         '''
         Enter into the server loop
         '''
-        # Properly exit if a SIGTERM/SIGINT is signalled
-        signal.signal(signal.SIGTERM, self.sig_stop)
-        signal.signal(signal.SIGINT, self.sig_stop)
-
         salt.utils.appendproctitle(self.__class__.__name__)
 
         # instantiate some classes inside our new process

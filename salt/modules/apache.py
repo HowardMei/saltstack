@@ -41,7 +41,7 @@ def __virtual__():
     cmd = _detect_os()
     if salt.utils.which(cmd):
         return 'apache'
-    return False
+    return (False, 'The apache execution module cannot be loaded: apache is not installed.')
 
 
 def _detect_os():
@@ -265,10 +265,10 @@ def useradd(pwfile, user, password, opts=''):
     .. code-block:: text
 
         n  Don't update file; display results on stdout.
-        m  Force MD5 encryption of the password (default).
-        d  Force CRYPT encryption of the password.
-        p  Do not encrypt the password (plaintext).
-        s  Force SHA encryption of the password.
+        m  Force MD5 hashing of the password (default).
+        d  Force CRYPT(3) hashing of the password.
+        p  Do not hash the password (plaintext).
+        s  Force SHA1 hashing of the password.
 
     CLI Examples:
 

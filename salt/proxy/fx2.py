@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-,
 '''
 Dell FX2 chassis
 ================
@@ -50,12 +50,45 @@ look like this:
     proxy:
       host: <ip or dns name of chassis controller>
       admin_username: <iDRAC username for the CMC, usually 'root'>
-      admin_password: <iDRAC password.  Dell default is 'calvin'>
+      fallback_admin_username: <username to try if the first fails>
+      passwords:
+        - first_password
+        - second_password
+        - third-password
       proxytype: fx2
 
 The ``proxytype`` line above is critical, it tells Salt which interface to load
 from the ``proxy`` directory in Salt's install hierarchy, or from ``/srv/salt/_proxy``
 on the salt-master (if you have created your own proxy module, for example).
+
+The proxy integration will try the passwords listed in order.  It is
+configured this way so you can have a regular password, a potential
+fallback password, and the third password can be the one you intend
+to change the chassis to use.  This way, after it is changed, you
+should not need to restart the proxy minion--it should just pick up the
+third password in the list.  You can then change pillar at will to
+move that password to the front and retire the unused ones.
+
+Beware, many Dell CMC and iDRAC units are configured to lockout
+IP addresses or users after too many failed password attempts.  This can
+generate user panic in the form of "I no longer know what the password is!!!".
+To mitigate panic try the web interface from a different IP, or setup a
+emergency administrator user in the CMC before doing a wholesale
+password rotation.
+
+The automatic lockout can be disabled via Salt with the following:
+
+.. code-block:: bash
+
+    salt <cmc> chassis.cmd set_general cfgRacTuning cfgRacTuneIpBlkEnable 0
+
+and then verified with
+
+.. code-block:: bash
+
+    salt <cmc> chassis.cmd get_general cfgRacTuning cfgRacTuneIpBlkEnable
+
+
 
 salt-proxy
 ----------
@@ -171,13 +204,60 @@ def __virtual__():
 
 def init(opts):
     '''
-    This function gets called when the proxy starts up.  For
-    FX2 devices we just cache the credentials and hostname.
+    This function gets called when the proxy starts up.
+    We check opts to see if a fallback user and password are supplied.
+    If they are present, and the primary credentials don't work, then
+    we try the backup before failing.
+
+    Whichever set of credentials works is placed in the persistent
+    DETAILS dictionary and will be used for further communication with the
+    chassis.
     '''
-    # Save the login details
-    DETAILS['admin_username'] = opts['proxy']['admin_username']
-    DETAILS['admin_password'] = opts['proxy']['admin_password']
+    if 'host' not in opts['proxy']:
+        log.critical('No "host" key found in pillar for this proxy')
+        return False
+
     DETAILS['host'] = opts['proxy']['host']
+
+    (username, password) = find_credentials()
+
+
+def admin_username():
+    '''
+    Return the admin_username in the DETAILS dictionary, or root if there
+    is none present
+    '''
+    return DETAILS.get('admin_username', 'root')
+
+
+def admin_password():
+    '''
+    Return the admin_password in the DETAILS dictionary, or 'calvin'
+    (the Dell default) if there is none present
+    '''
+    if 'admin_password' not in DETAILS:
+        log.info('proxy.fx2: No admin_password in DETAILS, returning Dell default')
+        return 'calvin'
+
+    return DETAILS.get('admin_password', 'calvin')
+
+
+def host():
+    return DETAILS['host']
+
+
+def _grains(host, user, password):
+    '''
+    Get the grains from the proxied device
+    '''
+    r = __salt__['dracr.system_info'](host=host,
+                                      admin_username=user,
+                                      admin_password=password)
+    if r.get('retcode', 0) == 0:
+        GRAINS_CACHE = r
+    else:
+        GRAINS_CACHE = {}
+    return GRAINS_CACHE
 
 
 def grains():
@@ -185,10 +265,10 @@ def grains():
     Get the grains from the proxied device
     '''
     if not GRAINS_CACHE:
-        r = __salt__['dracr.system_info'](host=DETAILS['host'],
-                                          admin_username=DETAILS['admin_username'],
-                                          admin_password=DETAILS['admin_password'])
-        GRAINS_CACHE = r
+        return _grains(DETAILS['host'],
+                       DETAILS['admin_username'],
+                       DETAILS['admin_password'])
+
     return GRAINS_CACHE
 
 
@@ -198,6 +278,42 @@ def grains_refresh():
     '''
     GRAINS_CACHE = {}
     return grains()
+
+
+def find_credentials():
+    '''
+    Cycle through all the possible credentials and return the first one that
+    works
+    '''
+    usernames = []
+    usernames.append(__pillar__['proxy'].get('admin_username', 'root'))
+    if 'fallback_admin_username' in __pillar__.get('proxy'):
+        usernames.append(__pillar__['proxy'].get('fallback_admin_username'))
+
+    for user in usernames:
+        for pwd in __pillar__['proxy']['passwords']:
+            r = __salt__['dracr.get_chassis_name'](host=__pillar__['proxy']['host'],
+                                                   admin_username=user,
+                                                   admin_password=pwd)
+            # Retcode will be present if the chassis_name call failed
+            try:
+                if r.get('retcode', None) is None:
+                    DETAILS['admin_username'] = user
+                    DETAILS['admin_password'] = pwd
+                    __opts__['proxy']['admin_username'] = user
+                    __opts__['proxy']['admin_password'] = pwd
+                    return (user, pwd)
+            except AttributeError:
+                # Then the above was a string, and we can return the username
+                # and password
+                DETAILS['admin_username'] = user
+                DETAILS['admin_password'] = pwd
+                __opts__['proxy']['admin_username'] = user
+                __opts__['proxy']['admin_password'] = pwd
+                return (user, pwd)
+
+    log.debug('proxy fx2.find_credentials found no valid credentials, using Dell default')
+    return ('root', 'calvin')
 
 
 def chconfig(cmd, *args, **kwargs):
@@ -219,15 +335,20 @@ def chconfig(cmd, *args, **kwargs):
             kwargs.pop(k)
 
     # Catch password reset
+    if 'dracr.'+cmd not in __salt__:
+        ret = {'retcode': -1, 'message': 'dracr.' + cmd + ' is not available'}
+    else:
+        ret = __salt__['dracr.'+cmd](*args, **kwargs)
+
     if cmd == 'change_password':
         if 'username' in kwargs:
+            __opts__['proxy']['admin_username'] = kwargs['username']
             DETAILS['admin_username'] = kwargs['username']
         if 'password' in kwargs:
+            __opts__['proxy']['admin_password'] = kwargs['password']
             DETAILS['admin_password'] = kwargs['password']
-    if 'dracr.'+cmd not in __salt__:
-        return {'retcode': -1, 'message': 'dracr.' + cmd + ' is not available'}
-    else:
-        return __salt__['dracr.'+cmd](*args, **kwargs)
+
+    return ret
 
 
 def ping():

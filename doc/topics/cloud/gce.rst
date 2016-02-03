@@ -60,13 +60,13 @@ Google Compute Engine Setup
 
 #. Key Format
 
-   *If you are using ``libcloud >= 0.17.0`` it is recommended that you use the ``JSON
-   format`` file you downloaded above and skip to the `Provider Configuration`_ section
-   below, using the JSON file **_in place of 'NEW.pem'_** in the documentation.
-   
-   If you are using an older version of libcloud or are unsure of the version you 
-   have, please follow the instructions below to generate and format a new P12 key.*
- 
+   .. note:: If you are using ``libcloud >= 0.17.0`` it is recommended that you use the ``JSON
+       format`` file you downloaded above and skip to the `Provider Configuration`_ section
+       below, using the JSON file **in place of 'NEW.pem'** in the documentation.
+
+       If you are using an older version of libcloud or are unsure of the version you
+       have, please follow the instructions below to generate and format a new P12 key.
+
    In the new *Service Account* section, click *Generate new P12 key*, which
    will automatically download a ``.p12`` private key file. The ``.p12``
    private key needs to be converted to a format compatible with libcloud.
@@ -283,6 +283,48 @@ this options allows the instance to send/receive non-matching src/dst
 packets. Default is ``False``.
 
 .. versionadded:: 2015.8.1
+
+Profile with scopes
+-------------------
+
+Scopes can be specified by setting the optional ``ex_service_accounts``
+key in your cloud profile. The following example enables the bigquery scope.
+
+.. code-block:: yaml
+
+  my-gce-profile:
+   image: centos-6
+    ssh_username: salt
+    size: f1-micro
+    location: us-central1-a
+    network: default
+    tags: '["one", "two", "three"]'
+    metadata: '{"one": "1", "2": "two",
+                "sshKeys": ""}'
+    use_persistent_disk: True
+    delete_boot_pd: False
+    deploy: False
+    make_master: False
+    provider: gce-config
+    ex_service_accounts:
+      - scopes:
+        - bigquery
+
+
+Email can also be specified as an (optional) parameter.
+
+.. code-block:: yaml
+
+  my-gce-profile:
+  ...snip
+    ex_service_accounts:
+      - scopes:
+        - bigquery
+        email: default
+
+There can be multiple entries for scopes since ``ex-service_accounts`` accepts
+a list of dictionaries. For more information refer to the libcloud documentation
+on `specifying service account scopes`__.
 
 SSH Remote Access
 =================
@@ -596,3 +638,5 @@ Both the instance and load-balancer must exist before using these functions.
 
     salt-cloud -f attach_lb gce name=lb member=w4
     salt-cloud -f detach_lb gce name=lb member=oops
+
+__ http://libcloud.readthedocs.org/en/latest/compute/drivers/gce.html#specifying-service-account-scopes

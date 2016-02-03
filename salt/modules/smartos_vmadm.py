@@ -50,7 +50,12 @@ def __virtual__():
     '''
     if salt.utils.is_smartos_globalzone() and _check_vmadm():
         return __virtualname__
-    return False
+    return (
+        False,
+        '{0} module can only be loaded on SmartOS computed nodes'.format(
+            __virtualname__
+        )
+    )
 
 
 def _exit_status(retcode):
@@ -284,7 +289,7 @@ def reboot(vm, force=False, key='uuid'):
     return True
 
 
-def list_vms(search=None, sort=None, order='uuid,type,ram,state,alias', keyed=False):
+def list_vms(search=None, sort=None, order='uuid,type,ram,state,alias', keyed=True):
     '''
     Return a list of VMs
 
@@ -747,7 +752,7 @@ def reprovision(vm, image, key='uuid'):
     return True
 
 
-def create(**kwargs):
+def create(from_file=None, **kwargs):
     '''
     Create a new vm
 
@@ -764,30 +769,28 @@ def create(**kwargs):
         salt '*' vmadm.create image_uuid='...' alias='...' nics='[{ "nic_tag": "admin", "ip": "198.51.100.123", ...}, {...}]' [...]
     '''
     ret = {}
-    vmadm = _check_vmadm()
     # prepare vmcfg
     vmcfg = {}
-    for key, value in kwargs.iteritems():
-        if key.startswith('_'):
-            continue
-        vmcfg[key] = value
+    kwargs = salt.utils.clean_kwargs(**kwargs)
+    for k, v in kwargs.iteritems():
+        vmcfg[k] = v
 
-    if 'from_file' in vmcfg:
-        return _create_update_from_file('create', path=vmcfg['from_file'])
+    if from_file:
+        return _create_update_from_file('create', path=from_file)
     else:
         return _create_update_from_cfg('create', vmcfg=vmcfg)
 
 
-def update(**kwargs):
+def update(vm, from_file=None, key='uuid', **kwargs):
     '''
     Update a new vm
 
     vm : string
         vm to be updated
-    key : string [uuid|alias|hostname]
-        value type of 'vm' parameter
     from_file : string
         json file to update the vm with -- if present, all other options will be ignored
+    key : string [uuid|alias|hostname]
+        value type of 'vm' parameter
     kwargs : string|int|...
         options to update for the vm
 
@@ -803,28 +806,19 @@ def update(**kwargs):
     vmadm = _check_vmadm()
     # prepare vmcfg
     vmcfg = {}
-    for key, value in kwargs.iteritems():
-        if key.startswith('_'):
-            continue
-        vmcfg[key] = value
+    kwargs = salt.utils.clean_kwargs(**kwargs)
+    for k, v in kwargs.iteritems():
+        vmcfg[k] = v
 
-    if 'vm' not in vmcfg:
-        ret['Error'] = 'uuid, alias or hostname must be provided'
-        return ret
-    key = 'uuid' if 'key' not in vmcfg else vmcfg['key']
     if key not in ['uuid', 'alias', 'hostname']:
         ret['Error'] = 'Key must be either uuid, alias or hostname'
         return ret
-    uuid = lookup('{0}={1}'.format(key, vmcfg['vm']), one=True)
+    uuid = lookup('{0}={1}'.format(key, vm), one=True)
     if 'Error' in uuid:
         return uuid
-    if 'vm' in vmcfg:
-        del vmcfg['vm']
-    if 'key' in vmcfg:
-        del vmcfg['key']
 
-    if 'from_file' in vmcfg:
-        return _create_update_from_file('update', uuid, path=vmcfg['from_file'])
+    if from_file:
+        return _create_update_from_file('update', uuid, path=from_file)
     else:
         return _create_update_from_cfg('update', uuid, vmcfg=vmcfg)
 

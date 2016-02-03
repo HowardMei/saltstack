@@ -5,10 +5,11 @@ Zeromq transport classes
 
 # Import Python Libs
 from __future__ import absolute_import
-import logging
 import os
+import copy
 import errno
 import hashlib
+import logging
 import weakref
 from random import randint
 
@@ -94,6 +95,27 @@ class AsyncZeroMQReqChannel(salt.transport.client.ReqChannel):
             new_obj.__singleton_init__(opts, **kwargs)
             loop_instance_map[key] = new_obj
             return loop_instance_map[key]
+
+    def __deepcopy__(self, memo):
+        cls = self.__class__
+        result = cls.__new__(cls, copy.deepcopy(self.opts, memo))  # pylint: disable=too-many-function-args
+        memo[id(self)] = result
+        for key in self.__dict__:
+            if key in ('_io_loop',):
+                continue
+                # The _io_loop has a thread Lock which will fail to be deep
+                # copied. Skip it because it will just be recreated on the
+                # new copy.
+            if key == 'message_client':
+                # Recreate the message client because it will fail to be deep
+                # copied. The reason is the same as the io_loop skip above.
+                setattr(result, key,
+                        AsyncReqMessageClient(result.opts,
+                                              self.master_uri,
+                                              io_loop=result._io_loop))
+                continue
+            setattr(result, key, copy.deepcopy(self.__dict__[key], memo))
+        return result
 
     @classmethod
     def __key(cls, opts, **kwargs):
@@ -271,7 +293,6 @@ class AsyncZeroMQPubChannel(salt.transport.mixins.auth.AESPubClientMixin, salt.t
         else:
             self._socket.setsockopt(zmq.SUBSCRIBE, '')
 
-        self._socket.setsockopt(zmq.SUBSCRIBE, '')
         self._socket.setsockopt(zmq.IDENTITY, self.opts['id'])
 
         # TODO: cleanup all the socket opts stuff
@@ -332,7 +353,7 @@ class AsyncZeroMQPubChannel(salt.transport.mixins.auth.AESPubClientMixin, salt.t
             self._stream.socket.close(0)
         elif hasattr(self, '_socket'):
             self._socket.close(0)
-        if hasattr(self, 'context'):
+        if hasattr(self, 'context') and self.context.closed is False:
             self.context.term()
 
     def __del__(self):
@@ -447,12 +468,16 @@ class ZeroMQReqServerChannel(salt.transport.mixins.auth.AESReqServerMixin, salt.
         self.workers.bind(self.w_uri)
 
         while True:
+            if self.clients.closed or self.workers.closed:
+                break
             try:
                 zmq.device(zmq.QUEUE, self.clients, self.workers)
             except zmq.ZMQError as exc:
                 if exc.errno == errno.EINTR:
                     continue
                 raise exc
+            except (KeyboardInterrupt, SystemExit):
+                break
 
     def close(self):
         '''
@@ -464,9 +489,14 @@ class ZeroMQReqServerChannel(salt.transport.mixins.auth.AESReqServerMixin, salt.
         if hasattr(self, '_monitor') and self._monitor is not None:
             self._monitor.stop()
             self._monitor = None
-        if hasattr(self, 'clients'):
+        if hasattr(self, 'clients') and self.clients.closed is False:
             self.clients.close()
-        self.stream.close()
+        if hasattr(self, 'workers') and self.workers.closed is False:
+            self.workers.close()
+        if hasattr(self, 'stream'):
+            self.stream.close()
+        if hasattr(self, 'context') and self.context.closed is False:
+            self.context.term()
 
     def pre_fork(self, process_manager):
         '''
@@ -706,6 +736,8 @@ class ZeroMQPubServerChannel(salt.transport.server.PubServerChannel):
             int_payload['topic_lst'] = load['tgt']
 
         pub_sock.send(self.serial.dumps(int_payload))
+        pub_sock.close()
+        context.term()
 
 
 # TODO: unit tests!
@@ -759,7 +791,8 @@ class AsyncReqMessageClient(object):
             # set this to None, more hacks for messed up pyzmq
             self.stream.socket = None
             self.socket.close()
-        self.context.term()
+        if self.context.closed is False:
+            self.context.term()
 
     def __del__(self):
         self.destroy()
@@ -848,20 +881,23 @@ class AsyncReqMessageClient(object):
 
         :raises: SaltReqTimeoutError
         '''
-        future = self.send_future_map.pop(message)
-        del self.send_timeout_map[message]
-        if future.attempts < future.tries:
-            future.attempts += 1
-            log.debug('SaltReqTimeoutError, retrying. ({0}/{1})'.format(future.attempts, future.tries))
-            self.send(
-                message,
-                timeout=future.timeout,
-                tries=future.tries,
-                future=future,
-            )
+        future = self.send_future_map.pop(message, None)
+        # In a race condition the message might have been sent by the time
+        # we're timing it out. Make sure the future is not None
+        if future is not None:
+            del self.send_timeout_map[message]
+            if future.attempts < future.tries:
+                future.attempts += 1
+                log.debug('SaltReqTimeoutError, retrying. ({0}/{1})'.format(future.attempts, future.tries))
+                self.send(
+                    message,
+                    timeout=future.timeout,
+                    tries=future.tries,
+                    future=future,
+                )
 
-        else:
-            future.set_exception(SaltReqTimeoutError('Message timed out'))
+            else:
+                future.set_exception(SaltReqTimeoutError('Message timed out'))
 
     def send(self, message, timeout=None, tries=3, future=None, callback=None):
         '''

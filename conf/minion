@@ -15,12 +15,22 @@
 # resolved, then the minion will fail to start.
 #master: salt
 
+# Set http proxy information for the minion when doing requests
+#proxy_host:
+#proxy_port:
+#proxy_username:
+#proxy_password:
+
 # If multiple masters are specified in the 'master' setting, the default behavior
 # is to always try to connect to them in the order they are listed. If random_master is
 # set to True, the order will be randomized instead. This can be helpful in distributing
 # the load of many minions executing salt-call requests, for example, from a cron job.
 # If only one master is listed, this setting is ignored and a warning will be logged.
+# NOTE: If master_type is set to failover, use master_shuffle instead.
 #random_master: False
+
+# Use if master_type is set to failover.
+#master_shuffle: False
 
 # Minions can connect to multiple masters simultaneously (all masters
 # are "hot"), or can be configured to failover if a master becomes
@@ -31,7 +41,9 @@
 # master_type: str
 
 # Poll interval in seconds for checking if the master is still there.  Only
-# respected if master_type above is "failover".
+# respected if master_type above is "failover". To disable the interval entirely,
+# set the value to -1. (This may be necessary on machines which have high numbers
+# of TCP connections, such as load balancers.)
 # master_alive_interval: 30
 
 # Set whether the minion should connect to the master via IPv6:
@@ -242,6 +254,12 @@
 # often lower this value
 #loop_interval: 60
 
+# The grains can be merged, instead of overridden, using this option.
+# This allows custom grains to defined different subvalues of a dictionary
+# grain. By default this feature is disabled, to enable set grains_deep_merge
+# to ``True``.
+#grains_deep_merge: False
+
 # The grains_refresh_every setting allows for a minion to periodically check
 # its grains to see if they have changed and, if so, to inform the master
 # of the new grains. This operation is moderately expensive, therefore
@@ -256,6 +274,11 @@
 
 # Cache grains on the minion. Default is False.
 #grains_cache: False
+
+# Cache rendered pillar data on the minion. Default is False.
+# This may cause 'cachedir'/pillar to contain sensitive data that should be
+# protected accordingly.
+#minion_pillar_cache: False
 
 # Grains cache expiration, in seconds. If the cache file is older than this
 # number of seconds then the grains cache will be dumped and fully re-populated
@@ -559,7 +582,7 @@
 #log_granular_levels: {}
 
 # To diagnose issues with minions disconnecting or missing returns, ZeroMQ
-# supports the use of monitor sockets # to log connection events. This
+# supports the use of monitor sockets to log connection events. This
 # feature requires ZeroMQ 4.0 or higher.
 #
 # To enable ZeroMQ monitor sockets, set 'zmq_monitor' to 'True' and log at a
@@ -571,7 +594,7 @@
 # 'value': 27, 'description': 'EVENT_DISCONNECTED'}
 #
 # All events logged will include the string 'ZeroMQ event'. A connection event
-# should be logged on the as the minion starts up and initially connects to the
+# should be logged as the minion starts up and initially connects to the
 # master. If not, check for debug log level and that the necessary version of
 # ZeroMQ is installed.
 #

@@ -182,10 +182,19 @@ def returner(load):
         )
 
 
-def save_load(jid, clear_load):
+def save_load(jid, clear_load, minions=None, recurse_count=0):
     '''
     Save the load to the specified jid
+
+    minions argument is to provide a pre-computed list of matched minions for
+    the job, for cases when this function can't compute that list itself (such
+    as for salt-ssh)
     '''
+    if recurse_count >= 5:
+        err = 'save_load could not write job cache file after {0} retries.'.format(recurse_count)
+        log.error(err)
+        raise salt.exceptions.SaltCacheError(err)
+
     jid_dir = _jid_dir(jid)
 
     serial = salt.payload.Serial(__opts__)
@@ -208,15 +217,19 @@ def save_load(jid, clear_load):
             )
     except IOError as exc:
         log.warning('Could not write job invocation cache file: {0}'.format(exc))
+        time.sleep(0.1)
+        return save_load(jid=jid, clear_load=clear_load,
+                         recurse_count=recurse_count+1)
 
     # if you have a tgt, save that for the UI etc
     if 'tgt' in clear_load:
-        ckminions = salt.utils.minions.CkMinions(__opts__)
-        # Retrieve the minions list
-        minions = ckminions.check_minions(
-                clear_load['tgt'],
-                clear_load.get('tgt_type', 'glob')
-                )
+        if minions is None:
+            ckminions = salt.utils.minions.CkMinions(__opts__)
+            # Retrieve the minions list
+            minions = ckminions.check_minions(
+                    clear_load['tgt'],
+                    clear_load.get('tgt_type', 'glob')
+                    )
         # save the minions to a cache so we can see in the UI
         try:
             serial.dump(

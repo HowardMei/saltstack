@@ -31,10 +31,10 @@ import logging
 
 # Import salt libs
 import salt.utils
-import salt.utils.locales
+from salt.utils.locales import sdecode
 
 # Import 3rd-party libs
-import salt.ext.six as six
+from salt.ext.six import string_types, iteritems
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +96,8 @@ def _changes(name,
         return False
 
     change = {}
+    if groups is None:
+        groups = lusr['groups']
     wanted_groups = sorted(set((groups or []) + (optional_groups or [])))
     if uid and lusr['uid'] != uid:
         change['uid'] = uid
@@ -143,6 +145,10 @@ def _changes(name,
         if expire and expire is not -1 and lshad['expire'] != expire:
             change['expire'] = expire
     # GECOS fields
+    if isinstance(fullname, string_types):
+        fullname = sdecode(fullname)
+    if isinstance(lusr['fullname'], string_types):
+        lusr['fullname'] = sdecode(lusr['fullname'])
     if fullname is not None and lusr['fullname'] != fullname:
         change['fullname'] = fullname
     if win_homedrive and lusr['homedrive'] != win_homedrive:
@@ -228,7 +234,8 @@ def present(name,
         A list of groups to assign the user to, pass a list object. If a group
         specified here does not exist on the minion, the state will fail.
         If set to the empty list, the user will be removed from all groups
-        except the default group.
+        except the default group. If unset, salt will assume current groups
+        are still wanted (see issue #28706).
 
     optional_groups
         A list of groups to assign the user to, pass a list object. If a group
@@ -244,7 +251,7 @@ def present(name,
 
     home
         The custom login directory of user. Uses default value of underlying
-        system if not set. Notice that this directory does not have to exists.
+        system if not set. Notice that this directory does not have to exist.
         This also the location of the home directory to create if createhome is
         set to True.
 
@@ -258,6 +265,7 @@ def present(name,
         Linux, FreeBSD, NetBSD, OpenBSD, and Solaris. If the ``empty_password``
         argument is set to ``True`` then ``password`` is ignored.
         For Windows this is the plain text password.
+        For Linux, the hash can be generated with ``openssl passwd -1``.
 
     .. versionchanged:: 0.16.0
        BSD support added.
@@ -340,34 +348,46 @@ def present(name,
         mapped to the specified drive. Must be a letter followed by a colon.
         Because of the colon, the value must be surrounded by single quotes. ie:
         - win_homedrive: 'U:
-    .. versionchanged:: 2015.8.0
+
+        .. versionchanged:: 2015.8.0
 
     win_profile (Windows Only)
         The custom profile directory of the user. Uses default value of
         underlying system if not set.
-    .. versionchanged:: 2015.8.0
+
+        .. versionchanged:: 2015.8.0
 
     win_logonscript (Windows Only)
         The full path to the logon script to run when the user logs in.
-    .. versionchanged:: 2015.8.0
+
+        .. versionchanged:: 2015.8.0
 
     win_description (Windows Only)
         A brief description of the purpose of the users account.
-    .. versionchanged:: 2015.8.0
+
+        .. versionchanged:: 2015.8.0
     '''
     if fullname is not None:
-        fullname = salt.utils.locales.sdecode(fullname)
+        fullname = sdecode(fullname)
     if roomnumber is not None:
-        roomnumber = salt.utils.locales.sdecode(roomnumber)
+        roomnumber = sdecode(roomnumber)
     if workphone is not None:
-        workphone = salt.utils.locales.sdecode(workphone)
+        workphone = sdecode(workphone)
     if homephone is not None:
-        homephone = salt.utils.locales.sdecode(homephone)
+        homephone = sdecode(homephone)
 
     ret = {'name': name,
            'changes': {},
            'result': True,
            'comment': 'User {0} is present and up to date'.format(name)}
+
+    # the comma is used to separate field in GECOS, thus resulting into
+    # salt adding the end of fullname each time this function is called
+    for gecos_field in ['fullname', 'roomnumber', 'workphone', 'homephone']:
+        if isinstance(gecos_field, string_types) and ',' in gecos_field:
+            ret['comment'] = "Unsupported char ',' in {0}".format(gecos_field)
+            ret['result'] = False
+            return ret
 
     if groups:
         missing_groups = [x for x in groups if not __salt__['group.info'](x)]
@@ -433,7 +453,7 @@ def present(name,
             ret['result'] = None
             ret['comment'] = ('The following user attributes are set to be '
                               'changed:\n')
-            for key, val in six.iteritems(changes):
+            for key, val in iteritems(changes):
                 if key == 'password':
                     val = 'XXX-REDACTED-XXX'
                 ret['comment'] += '{0}: {1}\n'.format(key, val)
@@ -444,7 +464,7 @@ def present(name,
         if __grains__['kernel'] in ('OpenBSD', 'FreeBSD'):
             lcpre = __salt__['user.get_loginclass'](name)
         pre = __salt__['user.info'](name)
-        for key, val in six.iteritems(changes):
+        for key, val in iteritems(changes):
             if key == 'passwd' and not empty_password:
                 __salt__['shadow.set_password'](name, password)
                 continue
@@ -453,10 +473,16 @@ def present(name,
                 continue
             # run chhome once to avoid any possible bad side-effect
             if key == 'home' and 'homeDoesNotExist' not in changes:
-                __salt__['user.chhome'](name, val, False)
+                if __grains__['kernel'] == 'Darwin':
+                    __salt__['user.chhome'](name, val)
+                else:
+                    __salt__['user.chhome'](name, val, False)
                 continue
             if key == 'homeDoesNotExist':
-                __salt__['user.chhome'](name, val, True)
+                if __grains__['kernel'] == 'Darwin':
+                    __salt__['user.chhome'](name, val)
+                else:
+                    __salt__['user.chhome'](name, val, True)
                 if not os.path.isdir(val):
                     __salt__['file.mkdir'](val, pre['uid'], pre['gid'], 0o755)
                 continue
@@ -589,7 +615,12 @@ def present(name,
         if __salt__['user.add'](**params):
             ret['comment'] = 'New user {0} created'.format(name)
             ret['changes'] = __salt__['user.info'](name)
-            if 'shadow.info' in __salt__ and not salt.utils.is_windows():
+            if not createhome:
+                # pwd incorrectly reports presence of home
+                ret['changes']['home'] = ''
+            if 'shadow.info' in __salt__ \
+                and not salt.utils.is_windows()\
+                and not salt.utils.is_darwin():
                 if password and not empty_password:
                     __salt__['shadow.set_password'](name, password)
                     spost = __salt__['shadow.info'](name)
@@ -655,6 +686,13 @@ def present(name,
                     ret['changes']['expire'] = expire
             elif salt.utils.is_windows() and password and not empty_password:
                 if not __salt__['user.setpassword'](name, password):
+                    ret['comment'] = 'User {0} created but failed to set' \
+                                     ' password to' \
+                                     ' {1}'.format(name, 'XXX-REDACTED-XXX')
+                    ret['result'] = False
+                ret['changes']['passwd'] = 'XXX-REDACTED-XXX'
+            elif salt.utils.is_darwin() and password and not empty_password:
+                if not __salt__['shadow.set_password'](name, password):
                     ret['comment'] = 'User {0} created but failed to set' \
                                      ' password to' \
                                      ' {1}'.format(name, 'XXX-REDACTED-XXX')

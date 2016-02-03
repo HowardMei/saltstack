@@ -11,6 +11,7 @@ import hashlib
 import os
 import shutil
 import ftplib
+from tornado.httputil import parse_response_start_line, HTTPInputError
 
 # Import salt libs
 from salt.exceptions import (
@@ -28,6 +29,7 @@ import salt.utils.templates
 import salt.utils.url
 import salt.utils.gzip_util
 import salt.utils.http
+import salt.utils.s3
 from salt.utils.locales import sdecode
 from salt.utils.openstack.swift import SaltSwift
 
@@ -62,6 +64,19 @@ class Client(object):
     def __init__(self, opts):
         self.opts = opts
         self.serial = salt.payload.Serial(self.opts)
+
+    # Add __setstate__ and __getstate__ so that the object may be
+    # deep copied. It normally can't be deep copied because its
+    # constructor requires an 'opts' parameter.
+    # The TCP transport needs to be able to deep copy this class
+    # due to 'salt.utils.context.ContextDict.clone'.
+    def __setstate__(self, state):
+        # This will polymorphically call __init__
+        # in the derived class.
+        self.__init__(state['opts'])
+
+    def __getstate__(self):
+        return {'opts': self.opts}
 
     def _check_proto(self, path):
         '''
@@ -229,6 +244,7 @@ class Client(object):
         # go through the list of all files finding ones that are in
         # the target directory and caching them
         for fn_ in self.file_list(saltenv):
+            fn_ = sdecode(fn_)
             if fn_.strip() and fn_.startswith(path):
                 if salt.utils.check_include_exclude(
                         fn_, include_pat, exclude_pat):
@@ -252,6 +268,7 @@ class Client(object):
                 saltenv
             )
             for fn_ in self.file_list_emptydirs(saltenv):
+                fn_ = sdecode(fn_)
                 if fn_.startswith(path):
                     minion_dir = '{0}/{1}'.format(dest, fn_)
                     if not os.path.isdir(minion_dir):
@@ -555,23 +572,28 @@ class Client(object):
 
         if url_data.scheme == 's3':
             try:
+                def s3_opt(key, default=None):
+                    '''Get value of s3.<key> from Minion config or from Pillar'''
+                    if 's3.' + key in self.opts:
+                        return self.opts['s3.' + key]
+                    try:
+                        return self.opts['pillar']['s3'][key]
+                    except (KeyError, TypeError):
+                        return default
                 salt.utils.s3.query(method='GET',
                                     bucket=url_data.netloc,
                                     path=url_data.path[1:],
                                     return_bin=False,
                                     local_file=dest,
                                     action=None,
-                                    key=self.opts.get('s3.key', None),
-                                    keyid=self.opts.get('s3.keyid', None),
-                                    service_url=self.opts.get('s3.service_url',
-                                                              None),
-                                    verify_ssl=self.opts.get('s3.verify_ssl',
-                                                              True),
-                                    location=self.opts.get('s3.location',
-                                                              None))
+                                    key=s3_opt('key'),
+                                    keyid=s3_opt('keyid'),
+                                    service_url=s3_opt('service_url'),
+                                    verify_ssl=s3_opt('verify_ssl', True),
+                                    location=s3_opt('location'))
                 return dest
-            except Exception:
-                raise MinionError('Could not fetch from {0}'.format(url))
+            except Exception as exc:
+                raise MinionError('Could not fetch from {0}. Exception: {1}'.format(url, exc))
         if url_data.scheme == 'ftp':
             try:
                 ftp = ftplib.FTP(url_data.hostname)
@@ -584,10 +606,20 @@ class Client(object):
 
         if url_data.scheme == 'swift':
             try:
-                swift_conn = SaltSwift(self.opts.get('keystone.user', None),
-                                       self.opts.get('keystone.tenant', None),
-                                       self.opts.get('keystone.auth_url', None),
-                                       self.opts.get('keystone.password', None))
+                def swift_opt(key, default):
+                    '''Get value of <key> from Minion config or from Pillar'''
+                    if key in self.opts:
+                        return self.opts[key]
+                    try:
+                        return self.opts['pillar'][key]
+                    except (KeyError, TypeError):
+                        return default
+
+                swift_conn = SaltSwift(swift_opt('keystone.user', None),
+                                       swift_opt('keystone.tenant', None),
+                                       swift_opt('keystone.auth_url', None),
+                                       swift_opt('keystone.password', None))
+
                 swift_conn.get_object(url_data.netloc,
                                       url_data.path[1:],
                                       dest)
@@ -598,7 +630,10 @@ class Client(object):
         get_kwargs = {}
         if url_data.username is not None \
                 and url_data.scheme in ('http', 'https'):
-            _, netloc = url_data.netloc.split('@', 1)
+            netloc = url_data.netloc
+            at_sign_pos = netloc.rfind('@')
+            if at_sign_pos != -1:
+                netloc = netloc[at_sign_pos + 1:]
             fixed_url = urlunparse(
                 (url_data.scheme, netloc, url_data.path,
                  url_data.params, url_data.query, url_data.fragment))
@@ -608,21 +643,56 @@ class Client(object):
 
         destfp = None
         try:
+            # Tornado calls streaming_callback on redirect response bodies.
+            # But we need streaming to support fetching large files (> RAM avail).
+            # Here we working this around by disabling recording the body for redirections.
+            # The issue is fixed in Tornado 4.3.0 so on_header callback could be removed
+            # when we'll deprecate Tornado<4.3.0.
+            # See #27093 and #30431 for details.
+
+            # Use list here to make it writable inside the on_header callback. Simple bool doesn't
+            # work here: on_header creates a new local variable instead. This could be avoided in
+            # Py3 with 'nonlocal' statement. There is no Py2 alternative for this.
+            write_body = [False]
+
+            def on_header(hdr):
+                try:
+                    hdr = parse_response_start_line(hdr)
+                except HTTPInputError:
+                    # Not the first line, do nothing
+                    return
+                write_body[0] = hdr.code not in [301, 302, 303, 307]
+
+            if no_cache:
+                result = []
+
+                def on_chunk(chunk):
+                    if write_body[0]:
+                        result.append(chunk)
+            else:
+                dest_tmp = "{0}.part".format(dest)
+                destfp = salt.utils.fopen(dest_tmp, 'wb')
+
+                def on_chunk(chunk):
+                    if write_body[0]:
+                        destfp.write(chunk)
+
             query = salt.utils.http.query(
                 fixed_url,
-                text=True,
+                stream=True,
+                streaming_callback=on_chunk,
+                header_callback=on_header,
                 username=url_data.username,
                 password=url_data.password,
                 **get_kwargs
             )
-            if 'text' not in query:
+            if 'handle' not in query:
                 raise MinionError('Error: {0}'.format(query['error']))
             if no_cache:
-                return query['body']
+                return ''.join(result)
             else:
-                dest_tmp = "{0}.part".format(dest)
-                with salt.utils.fopen(dest_tmp, 'wb') as destfp:
-                    destfp.write(query['body'])
+                destfp.close()
+                destfp = None
                 salt.utils.files.rename(dest_tmp, dest)
                 return dest
         except HTTPError as exc:
@@ -1088,12 +1158,17 @@ class RemoteClient(Client):
                 fn_.write(data)
             except (TypeError, KeyError) as e:
                 transport_tries += 1
-                log.error('Data transport is broken, got: {0}, type: {1}, '
-                          'exception: {2}, attempt {3} of 3'.format(
-                              data, type(data), e, transport_tries)
-                          )
+                log.warning('Data transport is broken, got: {0}, type: {1}, '
+                            'exception: {2}, attempt {3} of 3'.format(
+                                data, type(data), e, transport_tries)
+                            )
                 self._refresh_channel()
                 if transport_tries > 3:
+                    log.error('Data transport is broken, got: {0}, type: {1}, '
+                              'exception: {2}, '
+                              'Retry attempts exhausted'.format(
+                                data, type(data), e)
+                            )
                     break
 
         if fn_:
@@ -1128,7 +1203,7 @@ class RemoteClient(Client):
                 'prefix': prefix,
                 'cmd': '_file_list'}
 
-        return self.channel.send(load)
+        return [sdecode(fn_) for fn_ in self.channel.send(load)]
 
     def file_list_emptydirs(self, saltenv='base', prefix='', env=None):
         '''
