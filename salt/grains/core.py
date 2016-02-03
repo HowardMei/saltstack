@@ -24,6 +24,7 @@ import locale
 import salt.exceptions
 
 __proxyenabled__ = ['*']
+__FQDN__ = None
 
 # Extend the default list of supported distros. This will be used for the
 # /etc/DISTRO-release checking that is part of platform.linux_distribution()
@@ -508,6 +509,9 @@ def _virtual(osdata):
         if osdata['kernel'] == 'Darwin':
             command = 'system_profiler'
             args = ['SPDisplaysDataType']
+        elif osdata['kernel'] == 'SunOS':
+            command = 'prtdiag'
+            args = []
 
         cmd = salt.utils.which(command)
 
@@ -523,7 +527,8 @@ def _virtual(osdata):
                 if salt.log.is_logging_configured():
                     # systemd-detect-virt always returns > 0 on non-virtualized
                     # systems
-                    if salt.utils.is_windows() or 'systemd-detect-virt' in cmd:
+                    # prtdiag only works in the global zone, skip if it fails
+                    if salt.utils.is_windows() or 'systemd-detect-virt' in cmd or 'prtdiag' in cmd:
                         continue
                     failed_commands.add(command)
                 continue
@@ -566,7 +571,7 @@ def _virtual(osdata):
                 grains['virtual'] = 'LXC'
                 break
         elif command == 'virt-what':
-            if output in ('kvm', 'qemu', 'uml', 'xen'):
+            if output in ('kvm', 'qemu', 'uml', 'xen', 'lxc'):
                 grains['virtual'] = output
                 break
             elif 'vmware' in output:
@@ -639,6 +644,16 @@ def _virtual(osdata):
             if output:
                 grains['virtual'] = output.lower()
             break
+        elif command == 'prtdiag':
+            model = output.lower().split("\n")[0]
+            if 'vmware' in model:
+                grains['virtual'] = 'VMware'
+            elif 'virtualbox' in model:
+                grains['virtual'] = 'VirtualBox'
+            elif 'qemu' in model:
+                grains['virtual'] = 'kvm'
+            elif 'joyent smartdc hvm' in model:
+                grains['virtual'] = 'kvm'
     else:
         if osdata['kernel'] in skip_cmds:
             log.warn(
@@ -667,7 +682,8 @@ def _virtual(osdata):
                     if ':/lxc/' in fhr.read():
                         grains['virtual_subtype'] = 'LXC'
                 with salt.utils.fopen('/proc/1/cgroup', 'r') as fhr:
-                    if ':/docker/' in fhr.read():
+                    fhr_contents = fhr.read()
+                    if ':/docker/' in fhr_contents or ':/system.slice/docker' in fhr_contents:
                         grains['virtual_subtype'] = 'Docker'
             except IOError:
                 pass
@@ -781,7 +797,7 @@ def _virtual(osdata):
             zone = __salt__['cmd.run']('{0}'.format(zonename))
             if zone != 'global':
                 grains['virtual'] = 'zone'
-                if osdata['os'] == 'SmartOS':
+                if salt.utils.is_smartos_zone():
                     grains.update(_smartos_zone_data())
         # Check if it's a branded zone (i.e. Solaris 8/9 zone)
         if isdir('/.SUNWnative'):
@@ -876,7 +892,7 @@ def _windows_platform_data():
             motherboard['product'] = motherboardinfo.Product
             motherboard['serial'] = motherboardinfo.SerialNumber
         except IndexError:
-            log.debug('Motherboard info not available on this sytem')
+            log.debug('Motherboard info not available on this system')
 
         # the name of the OS comes with a bunch of other data about the install
         # location. For example:
@@ -921,6 +937,33 @@ def _windows_platform_data():
     return grains
 
 
+def _osx_platform_data():
+    '''
+    Additional data for Mac OS X systems
+    Returns: A dictionary containing values for the following:
+        - model_name
+        - boot_rom_version
+        - smc_version
+        - system_serialnumber
+    '''
+    cmd = 'system_profiler SPHardwareDataType'
+    hardware = __salt__['cmd.run'](cmd)
+
+    grains = {}
+    for line in hardware.splitlines():
+        field_name, _, field_val = line.partition(': ')
+        if field_name.strip() == "Model Name":
+            grains['model_name'] = field_val
+        if field_name.strip() == "Boot ROM Version":
+            grains['boot_rom_version'] = field_val
+        if field_name.strip() == "SMC Version (system)":
+            grains['smc_version'] = field_val
+        if field_name.strip() == "Serial Number (system)":
+            grains['system_serialnumber'] = field_val
+
+    return grains
+
+
 def id_():
     '''
     Return the id
@@ -952,6 +995,8 @@ _OS_NAME_MAP = {
     'synology': 'Synology',
     'nilrt': 'NILinuxRT',
     'manjaro': 'Manjaro',
+    'antergos': 'Antergos',
+    'sles': 'SUSE',
 }
 
 # Map the 'os' grain to the 'os_family' grain
@@ -982,6 +1027,8 @@ _OS_FAMILY_MAP = {
     'SLED': 'Suse',
     'openSUSE': 'Suse',
     'SUSE': 'Suse',
+    'openSUSE Leap': 'Suse',
+    'openSUSE Tumbleweed': 'Suse',
     'Solaris': 'Solaris',
     'SmartOS': 'Solaris',
     'OpenIndiana Development': 'Solaris',
@@ -990,6 +1037,7 @@ _OS_FAMILY_MAP = {
     'OpenSolaris': 'Solaris',
     'Arch ARM': 'Arch',
     'Manjaro': 'Arch',
+    'Antergos': 'Arch',
     'ALT': 'RedHat',
     'Trisquel': 'Debian',
     'GCEL': 'Debian',
@@ -1032,6 +1080,31 @@ def _get_interfaces():
     if not _INTERFACES:
         _INTERFACES = salt.utils.network.interfaces()
     return _INTERFACES
+
+
+def _parse_os_release():
+    '''
+    Parse /etc/os-release and return a parameter dictionary
+
+    See http://www.freedesktop.org/software/systemd/man/os-release.html
+    for specification of the file format.
+    '''
+
+    filename = '/etc/os-release'
+    if not os.path.isfile(filename):
+        filename = '/usr/lib/os-release'
+
+    data = dict()
+    with salt.utils.fopen(filename) as ifile:
+        regex = re.compile('^([\\w]+)=(?:\'|")?(.*?)(?:\'|")?$')
+        for line in ifile:
+            match = regex.match(line.strip())
+            if match:
+                # Shell special characters ("$", quotes, backslash, backtick)
+                # are escaped with backslashes
+                data[match.group(1)] = re.sub(r'\\([$"\'\\`])', r'\1', match.group(2))
+
+    return data
 
 
 def os_data():
@@ -1175,41 +1248,30 @@ def os_data():
                                 'lsb_{0}'.format(match.groups()[0].lower())
                             ] = match.groups()[1].rstrip()
             if 'lsb_distrib_id' not in grains:
-                if os.path.isfile('/etc/os-release'):
-                    # Arch ARM Linux - SUSE 12+ - openSUSE 13+
-                    with salt.utils.fopen('/etc/os-release') as ifile:
-                        # Imitate lsb-release
-                        for line in ifile:
-                            # NAME="Arch Linux ARM"
-                            # ID=archarm
-                            # ID_LIKE=arch
-                            # PRETTY_NAME="Arch Linux ARM"
-                            # ANSI_COLOR="0;36"
-                            # HOME_URL="http://archlinuxarm.org/"
-                            # SUPPORT_URL="https://archlinuxarm.org/forum"
-                            # BUG_REPORT_URL=
-                            #   "https://github.com/archlinuxarm/PKGBUILDs/issues"
-                            regex = re.compile(
-                                '^([\\w]+)=(?:\'|")?([\\w\\s\\.\\-_]+)(?:\'|")?'
-                            )
-                            match = regex.match(line.rstrip('\n'))
-                            if match:
-                                name, value = match.groups()
-                                if name.lower() == 'name':
-                                    grains['lsb_distrib_id'] = value.strip()
-                                elif name.lower() == 'version_id':
-                                    grains['lsb_distrib_release'] = value
-                                elif name.lower() == 'pretty_name':
-                                    grains['lsb_distrib_codename'] = value
+                if os.path.isfile('/etc/os-release') or os.path.isfile('/usr/lib/os-release'):
+                    os_release = _parse_os_release()
+                    if 'NAME' in os_release:
+                        grains['lsb_distrib_id'] = os_release['NAME'].strip()
+                    if 'VERSION_ID' in os_release:
+                        grains['lsb_distrib_release'] = os_release['VERSION_ID']
+                    if 'PRETTY_NAME' in os_release:
+                        grains['lsb_distrib_codename'] = os_release['PRETTY_NAME']
                 elif os.path.isfile('/etc/SuSE-release'):
                     grains['lsb_distrib_id'] = 'SUSE'
+                    version = ''
+                    patch = ''
                     with salt.utils.fopen('/etc/SuSE-release') as fhr:
-                        rel = re.sub("[^0-9]", "", fhr.read().split('\n')[1])
-                    with salt.utils.fopen('/etc/SuSE-release') as fhr:
-                        patch = re.sub("[^0-9]", "", fhr.read().split('\n')[2])
-                    release = rel + " SP" + patch
-                    grains['lsb_distrib_release'] = release
-                    grains['lsb_distrib_codename'] = "n.a"
+                        for line in fhr:
+                            if 'enterprise' in line.lower():
+                                grains['lsb_distrib_id'] = 'SLES'
+                            elif 'version' in line.lower():
+                                version = re.sub(r'[^0-9]', '', line)
+                            elif 'patchlevel' in line.lower():
+                                patch = re.sub(r'[^0-9]', '', line)
+                    grains['lsb_distrib_release'] = version
+                    if patch:
+                        grains['lsb_distrib_release'] += ' SP' + patch
+                    grains['lsb_distrib_codename'] = 'n.a'
                 elif os.path.isfile('/etc/altlinux-release'):
                     # ALT Linux
                     grains['lsb_distrib_id'] = 'altlinux'
@@ -1294,10 +1356,10 @@ def os_data():
         grains['os_family'] = 'Solaris'
         if salt.utils.is_smartos():
             # See https://github.com/joyent/smartos-live/issues/224
-            uname_v = __salt__['cmd.run']('uname -v')
+            uname_v = os.uname()[3]
             grains['os'] = grains['osfullname'] = 'SmartOS'
             grains['osrelease'] = uname_v[uname_v.index('_')+1:]
-        if salt.utils.is_smartos_globalzone():
+        elif salt.utils.is_smartos_globalzone():
             grains.update(_smartos_computenode_data())
         elif os.path.isfile('/etc/release'):
             with salt.utils.fopen('/etc/release', 'r') as fp_:
@@ -1325,16 +1387,26 @@ def os_data():
         grains['os'] = 'ESXi'
     elif grains['kernel'] == 'Darwin':
         osrelease = __salt__['cmd.run']('sw_vers -productVersion')
-        grains['os_build_version'] = __salt__['cmd.run']('sw_vers -buildVersion')
+        osname = __salt__['cmd.run']('sw_vers -productName')
+        osbuild = __salt__['cmd.run']('sw_vers -buildVersion')
         grains['os'] = 'MacOS'
         grains['os_family'] = 'MacOS'
+        grains['osfullname'] = "{0} {1}".format(osname, osrelease)
         grains['osrelease'] = osrelease
-        grains['osmajorrelease'] = osrelease.rsplit('.', 1)[0]
+        grains['osbuild'] = osbuild
         grains.update(_bsd_cpudata(grains))
         grains.update(_osx_gpudata())
+        grains.update(_osx_platform_data())
     else:
         grains['os'] = grains['kernel']
-    if grains['kernel'] in ('FreeBSD', 'OpenBSD', 'NetBSD'):
+    if grains['kernel'] == 'FreeBSD':
+        try:
+            grains['osrelease'] = __salt__['cmd.run']('freebsd-version -u').split('-')[0]
+        except salt.exceptions.CommandExecutionError:
+            # freebsd-version was introduced in 10.0.
+            # derive osrelease from kernelversion prior to that
+            grains['osrelease'] = grains['kernelrelease'].split('-')[0]
+    if grains['kernel'] in ('OpenBSD', 'NetBSD'):
         grains.update(_bsd_cpudata(grains))
         grains['osrelease'] = grains['kernelrelease'].split('-')[0]
         if grains['kernel'] == 'NetBSD':
@@ -1353,7 +1425,7 @@ def os_data():
     # architecture.
     if grains.get('os_family') == 'Debian':
         osarch = __salt__['cmd.run']('dpkg --print-architecture').strip()
-    elif grains.get('os') == 'Fedora':
+    elif grains.get('os_family') == 'RedHat':
         osarch = __salt__['cmd.run']('rpm --eval %{_host_cpu}').strip()
     elif grains.get('os_family') == 'NILinuxRT':
         archinfo = {}
@@ -1394,18 +1466,12 @@ def os_data():
         grains['osfinger'] = '{os}-{ver}'.format(
             os=grains['osfullname'],
             ver=grains['osrelease'].partition('.')[0])
-    elif grains.get('os') in ('FreeBSD', 'OpenBSD', 'NetBSD'):
+    elif grains.get('os') in ('FreeBSD', 'OpenBSD', 'NetBSD', 'Mac'):
         grains['osmajorrelease'] = grains['osrelease'].split('.', 1)[0]
 
         grains['osfinger'] = '{os}-{ver}'.format(
             os=grains['os'],
             ver=grains['osrelease'])
-    elif grains.get('os') in 'MacOS':
-        grains['osmajorrelease'] = grains['osrelease'].split('.', 1)[0]
-
-        grains['osfinger'] = '{os}-{ver}'.format(
-            os=grains['os'],
-            ver=grains['osrelease'].rsplit('.', 1)[0])
 
     if grains.get('osrelease', ''):
         osrelease_info = grains['osrelease'].split('.')
@@ -1454,13 +1520,16 @@ def hostname():
     #   host
     #   localhost
     #   domain
+    global __FQDN__
     grains = {}
 
     if salt.utils.is_proxy():
         return grains
 
     grains['localhost'] = socket.gethostname()
-    grains['fqdn'] = salt.utils.network.get_fqhostname()
+    if __FQDN__ is None:
+        __FQDN__ = salt.utils.network.get_fqhostname()
+    grains['fqdn'] = __FQDN__
     (grains['host'], grains['domain']) = grains['fqdn'].partition('.')[::2]
     return grains
 
@@ -1499,11 +1568,14 @@ def fqdn_ip4():
     if salt.utils.is_proxy():
         return {}
 
+    addrs = []
     try:
-        info = socket.getaddrinfo(hostname()['fqdn'], None, socket.AF_INET)
-        addrs = list(set(item[4][0] for item in info))
+        hostname_grains = hostname()
+        if hostname_grains['domain']:
+            info = socket.getaddrinfo(hostname_grains['fqdn'], None, socket.AF_INET)
+            addrs = list(set(item[4][0] for item in info))
     except socket.error:
-        addrs = []
+        pass
     return {'fqdn_ip4': addrs}
 
 
@@ -1526,11 +1598,14 @@ def fqdn_ip6():
     if salt.utils.is_proxy():
         return {}
 
+    addrs = []
     try:
-        info = socket.getaddrinfo(hostname()['fqdn'], None, socket.AF_INET6)
-        addrs = list(set(item[4][0] for item in info))
+        hostname_grains = hostname()
+        if hostname_grains['domain']:
+            info = socket.getaddrinfo(hostname_grains['fqdn'], None, socket.AF_INET6)
+            addrs = list(set(item[4][0] for item in info))
     except socket.error:
-        addrs = []
+        pass
     return {'fqdn_ip6': addrs}
 
 
@@ -1771,7 +1846,7 @@ def saltversioninfo():
     # Provides:
     #   saltversioninfo
     from salt.version import __version_info__
-    return {'saltversioninfo': __version_info__}
+    return {'saltversioninfo': list(__version_info__)}
 
 
 def _hw_data(osdata):
@@ -1951,9 +2026,27 @@ def _smartos_zone_data():
     grains['zonename'] = __salt__['cmd.run']('zonename')
     grains['zoneid'] = __salt__['cmd.run']('zoneadm list -p | awk -F: \'{ print $1 }\'', python_shell=True)
     grains['hypervisor_uuid'] = __salt__['cmd.run']('mdata-get sdc:server_uuid')
+    if "FAILURE" in grains['hypervisor_uuid'] or "No metadata" in grains['hypervisor_uuid']:
+        grains['hypervisor_uuid'] = "Unknown"
     grains['datacenter'] = __salt__['cmd.run']('mdata-get sdc:datacenter_name')
     if "FAILURE" in grains['datacenter'] or "No metadata" in grains['datacenter']:
         grains['datacenter'] = "Unknown"
+
+    # allow roles to be defined in vmadm metadata
+    for mdata_grain in __salt__['cmd.run']('mdata-list').splitlines():
+        grain_data = __salt__['cmd.run']('mdata-get {0}'.format(mdata_grain))
+
+        if mdata_grain == 'roles':  # parse roles as roles grain
+            grain_data = grain_data.split(',')
+            grains['roles'] = grain_data
+        else:  # parse other grains into mdata
+            if not mdata_grain.startswith('sdc:'):
+                if 'mdata' not in grains:
+                    grains['mdata'] = {}
+
+                mdata_grain = mdata_grain.replace('-', '_')
+                mdata_grain = mdata_grain.replace(':', '_')
+                grains['mdata'][mdata_grain] = grain_data
 
     return grains
 

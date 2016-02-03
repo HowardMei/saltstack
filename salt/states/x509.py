@@ -125,6 +125,7 @@ handle properly formatting the text before writing the output.
 /srv/salt/cert.sls
 
 .. code-block:: yaml
+
     /usr/local/share/ca-certificates:
       file.directory: []
 
@@ -622,6 +623,9 @@ def pem_managed(name,
         ret['result'] = True
         ret['comment'] = 'The file is already in the correct state'
         return ret
+
+    ret['changes']['new'] = new
+    ret['changes']['old'] = current
 
     if __opts__['test'] is True:
         ret['result'] = None

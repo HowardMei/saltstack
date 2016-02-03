@@ -12,7 +12,7 @@ import logging
 import salt
 import salt.loader
 import salt.utils
-from salt.utils.process import MultiprocessingProcess
+from salt.utils.process import SignalHandlingMultiprocessingProcess
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +48,8 @@ def start_engines(opts, proc_mgr):
             engine_opts = None
         fun = '{0}.start'.format(engine)
         if fun in engines:
+            start_func = engines[fun]
+            name = '{0}.Engine({1})'.format(__name__, start_func.__module__)
             proc_mgr.add_process(
                     Engine,
                     args=(
@@ -56,24 +58,47 @@ def start_engines(opts, proc_mgr):
                         engine_opts,
                         funcs,
                         runners
-                        )
+                        ),
+                    name=name
                     )
 
 
-class Engine(MultiprocessingProcess):
+class Engine(SignalHandlingMultiprocessingProcess):
     '''
     Execute the given engine in a new process
     '''
-    def __init__(self, opts, fun, config, funcs, runners, **kwargs):
+    def __init__(self, opts, fun, config, funcs, runners, log_queue=None):
         '''
         Set up the process executor
         '''
-        super(Engine, self).__init__(**kwargs)
+        super(Engine, self).__init__(log_queue=log_queue)
         self.opts = opts
         self.config = config
         self.fun = fun
         self.funcs = funcs
         self.runners = runners
+
+    # __setstate__ and __getstate__ are only used on Windows.
+    # We do this so that __init__ will be invoked on Windows in the child
+    # process so that a register_after_fork() equivalent will work on Windows.
+    def __setstate__(self, state):
+        self._is_child = True
+        self.__init__(
+            state['opts'],
+            state['fun'],
+            state['config'],
+            state['funcs'],
+            state['runners'],
+            log_queue=state['log_queue']
+        )
+
+    def __getstate__(self):
+        return {'opts': self.opts,
+                'fun': self.fun,
+                'config': self.config,
+                'funcs': self.funcs,
+                'runners': self.runners,
+                'log_queue': self.log_queue}
 
     def run(self):
         '''

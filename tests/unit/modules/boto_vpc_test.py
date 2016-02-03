@@ -70,9 +70,10 @@ dhcp_options_parameters.update(conn_parameters)
 
 opts = salt.config.DEFAULT_MINION_OPTS
 utils = salt.loader.utils(opts, whitelist=['boto'])
+mods = salt.loader.minion_mods(opts)
 
 boto_vpc.__utils__ = utils
-boto_vpc.__init__(opts)
+boto_vpc.__init__(opts, pack=mods)
 
 
 def _has_required_boto():
@@ -327,6 +328,7 @@ class BotoVpcTestCase(BotoVpcTestCaseBase, BotoVpcTestCaseMixin):
         self.assertFalse(vpc_exists_result['exists'])
 
     @mock_ec2
+    @skipIf(True, 'Disabled pending https://github.com/spulec/moto/issues/493')
     def test_that_when_checking_if_a_vpc_exists_but_providing_no_filters_the_vpc_exists_method_raises_a_salt_invocation_error(self):
         '''
         Tests checking vpc existence when no filters are provided
@@ -403,6 +405,7 @@ class BotoVpcTestCase(BotoVpcTestCaseBase, BotoVpcTestCaseMixin):
         self.assertEqual(get_id_result['id'], None)
 
     @mock_ec2
+    @skipIf(True, 'Disabled pending https://github.com/spulec/moto/issues/493')
     def test_get_vpc_id_method_when_not_providing_filters_raises_a_salt_invocation_error(self):
         '''
         Tests getting vpc id but providing no filters
@@ -449,6 +452,7 @@ class BotoVpcTestCase(BotoVpcTestCaseBase, BotoVpcTestCaseMixin):
         self.assertTrue(vpc_creation_result)
 
     @mock_ec2
+    @skipIf(True, 'Disabled pending https://github.com/spulec/moto/issues/493')
     def test_that_when_creating_a_vpc_fails_the_create_vpc_method_returns_false(self):
         '''
         tests False VPC not created.
@@ -489,7 +493,7 @@ class BotoVpcTestCase(BotoVpcTestCaseBase, BotoVpcTestCaseMixin):
 
         vpc_properties = dict(id=vpc.id,
                               cidr_block=six.text_type(cidr_block),
-                              is_default=None,
+                              is_default=False,
                               state=u'available',
                               tags={u'Name': u'test', u'test': u'testvalue'},
                               dhcp_options_id=u'dopt-7a8b9c2d',
@@ -509,6 +513,7 @@ class BotoVpcTestCase(BotoVpcTestCaseBase, BotoVpcTestCaseMixin):
         self.assertFalse(describe_vpc['vpc'])
 
     @mock_ec2
+    @skipIf(True, 'Disabled pending https://github.com/spulec/moto/issues/493')
     def test_that_when_describing_vpc_by_id_on_connection_error_it_returns_error(self):
         '''
         Tests describing parameters failure
@@ -614,6 +619,7 @@ class BotoVpcSubnetsTestCase(BotoVpcTestCaseBase, BotoVpcTestCaseMixin):
         self.assertTrue(subnet_creation_result['created'])
 
     @mock_ec2
+    @skipIf(True, 'Disabled pending https://github.com/spulec/moto/issues/493')
     def test_that_when_creating_a_subnet_fails_the_create_subnet_method_returns_error(self):
         '''
         Tests creating a subnet failure
@@ -714,6 +720,7 @@ class BotoVpcSubnetsTestCase(BotoVpcTestCaseBase, BotoVpcTestCaseMixin):
         self.assertFalse(subnet_exists_result['exists'])
 
     @mock_ec2
+    @skipIf(True, 'Disabled pending https://github.com/spulec/moto/issues/493')
     def test_that_when_checking_if_a_subnet_exists_but_providing_no_filters_the_subnet_exists_method_raises_a_salt_invocation_error(self):
         '''
         Tests checking subnet existence without any filters
@@ -934,6 +941,7 @@ class BotoVpcDHCPOptionsTestCase(BotoVpcTestCaseBase, BotoVpcTestCaseMixin):
         self.assertTrue(dhcp_options_creation_result['created'])
 
     @mock_ec2
+    @skipIf(True, 'Disabled pending https://github.com/spulec/moto/issues/493')
     def test_that_when_creating_dhcp_options_fails_the_create_dhcp_options_method_returns_error(self):
         '''
         Tests creating dhcp options failure
@@ -996,6 +1004,7 @@ class BotoVpcDHCPOptionsTestCase(BotoVpcTestCaseBase, BotoVpcTestCaseMixin):
         self.assertTrue(dhcp_creation_and_association_result['created'])
 
     @mock_ec2
+    @skipIf(True, 'Disabled pending https://github.com/spulec/moto/issues/493')
     def test_that_when_creating_and_associating_dhcp_options_set_to_an_existing_vpc_fails_creating_the_dhcp_options_the_associate_new_dhcp_options_method_raises_exception(
             self):
         '''
@@ -1009,6 +1018,7 @@ class BotoVpcDHCPOptionsTestCase(BotoVpcTestCaseBase, BotoVpcTestCaseMixin):
             self.assertTrue('error' in r)
 
     @mock_ec2
+    @skipIf(True, 'Disabled pending https://github.com/spulec/moto/issues/493')
     def test_that_when_creating_and_associating_dhcp_options_set_to_an_existing_vpc_fails_associating_the_dhcp_options_the_associate_new_dhcp_options_method_raises_exception(self):
         '''
         Tests association failure during creation/association of dchp options to existing vpc
@@ -1050,6 +1060,7 @@ class BotoVpcDHCPOptionsTestCase(BotoVpcTestCaseBase, BotoVpcTestCaseMixin):
         self.assertFalse(r['exists'])
 
     @mock_ec2
+    @skipIf(True, 'Disabled pending https://github.com/spulec/moto/issues/493')
     def test_that_when_checking_if_dhcp_options_exists_but_providing_no_filters_the_dhcp_options_exists_method_raises_a_salt_invocation_error(self):
         '''
         Tests checking dhcp option existence with no filters
@@ -1174,6 +1185,7 @@ class BotoVpcNetworkACLTestCase(BotoVpcTestCaseBase, BotoVpcTestCaseMixin):
         self.assertFalse(network_acl_deletion_result['exists'])
 
     @mock_ec2
+    @skipIf(True, 'Disabled pending https://github.com/spulec/moto/issues/493')
     def test_that_when_checking_if_network_acl_exists_but_providing_no_filters_the_network_acl_exists_method_raises_a_salt_invocation_error(self):
         '''
         Tests checking existence of network acl with no filters
@@ -1506,6 +1518,7 @@ class BotoVpcRouteTablesTestCase(BotoVpcTestCaseBase, BotoVpcTestCaseMixin):
         self.assertFalse(route_table_existence_result)
 
     @mock_ec2
+    @skipIf(True, 'Disabled pending https://github.com/spulec/moto/issues/493')
     def test_that_when_checking_if_a_route_table_exists_but_providing_no_filters_the_route_table_exists_method_raises_a_salt_invocation_error(self):
         '''
         Tests checking route table without filters

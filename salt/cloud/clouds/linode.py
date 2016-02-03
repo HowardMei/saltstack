@@ -31,9 +31,11 @@ import logging
 import pprint
 import re
 import time
+import datetime
 
 # Import Salt Libs
 import salt.config as config
+import salt.ext.six as six
 from salt.ext.six.moves import range
 from salt.exceptions import (
     SaltCloudConfigError,
@@ -48,6 +50,9 @@ import salt.utils.cloud
 
 # Get logging started
 log = logging.getLogger(__name__)
+
+# The epoch of the last time a query was made
+LASTCALL = int(time.mktime(datetime.datetime.now().timetuple()))
 
 # Human-readable status fields (documentation: https://www.linode.com/api/linode/linode.list)
 LINODE_STATUS = {
@@ -323,6 +328,7 @@ def create(vm_):
     '''
     Create a single Linode VM.
     '''
+    name = vm_['name']
     try:
         # Check for required profile parameters before sending any API calls.
         if vm_['profile'] and config.is_profile_configured(__opts__,
@@ -337,7 +343,6 @@ def create(vm_):
     if 'provider' in vm_:
         vm_['driver'] = vm_.pop('provider')
 
-    name = vm_['name']
     if _validate_name(name) is False:
         return False
 
@@ -356,54 +361,77 @@ def create(vm_):
     log.info('Creating Cloud VM {0}'.format(name))
 
     data = {}
-    kwargs = {
-        'name': name,
-        'image': vm_['image'],
-        'size': vm_['size'],
-    }
+    kwargs = {'name': name}
 
-    plan_id = get_plan_id(kwargs={'label': vm_['size']})
-    try:
-        datacenter_id = get_datacenter_id(vm_['location'])
-    except KeyError:
-        # Linode's default datacenter is Dallas, but we still have to set one to
-        # use the create function from Linode's API. Dallas's datacenter id is 2.
-        datacenter_id = 2
+    plan_id = None
+    size = vm_.get('size')
+    if size:
+        kwargs['size'] = size
+        plan_id = get_plan_id(kwargs={'label': size})
 
-    if 'clonefrom' in vm_:
-        linode_id = get_linode_id_from_name(vm_['clonefrom'])
+    datacenter_id = None
+    location = vm_.get('location')
+    if location:
+        try:
+            datacenter_id = get_datacenter_id(location)
+        except KeyError:
+            # Linode's default datacenter is Dallas, but we still have to set one to
+            # use the create function from Linode's API. Dallas's datacenter id is 2.
+            datacenter_id = 2
+
+    clonefrom_name = vm_.get('clonefrom')
+    cloning = True if clonefrom_name else False
+    if cloning:
+        linode_id = get_linode_id_from_name(clonefrom_name)
         clone_source = get_linode(kwargs={'linode_id': linode_id})
 
-        kwargs.update({'clonefrom': vm_['clonefrom']})
-        kwargs['image'] = 'Clone of {0}'.format(vm_['clonefrom'])
-        kwargs['size'] = clone_source['TOTALRAM']
+        kwargs = {
+            'clonefrom': clonefrom_name,
+            'image': 'Clone of {0}'.format(clonefrom_name),
+        }
 
+        if size is None:
+            size = clone_source['TOTALRAM']
+            kwargs['size'] = size
+            plan_id = clone_source['PLANID']
+
+        if location is None:
+            datacenter_id = clone_source['DATACENTERID']
+
+        # Create new Linode from cloned Linode
         try:
             result = clone(kwargs={'linode_id': linode_id,
                                    'datacenter_id': datacenter_id,
                                    'plan_id': plan_id})
-        except Exception:
+        except Exception as err:
             log.error(
-                'Error cloning {0} on Linode\n\n'
+                'Error cloning \'{0}\' on Linode.\n\n'
                 'The following exception was thrown by Linode when trying to '
-                'clone the specified machine:\n'.format(
-                    vm_['clonefrom']
+                'clone the specified machine:\n'
+                '{1}'.format(
+                    clonefrom_name,
+                    err
                 ),
                 exc_info_on_loglevel=logging.DEBUG
             )
             return False
     else:
+        kwargs['image'] = vm_['image']
+
+        # Create Linode
         try:
             result = _query('linode', 'create', args={
                 'PLANID': plan_id,
                 'DATACENTERID': datacenter_id
             })
-        except Exception:
+        except Exception as err:
             log.error(
                 'Error creating {0} on Linode\n\n'
                 'The following exception was thrown by Linode when trying to '
-                'run the initial deployment:\n'.format(
-                    name
+                'run the initial deployment:\n'
+                '{1}'.format(
+                    name,
+                    err
                 ),
                 exc_info_on_loglevel=logging.DEBUG
             )
@@ -431,11 +459,6 @@ def create(vm_):
     update_linode(node_id, update_args={'Label': name})
     log.debug('Set name for {0} - was linode{1}.'.format(name, node_id))
 
-    # Create disks and get ids
-    log.debug('Creating disks for {0}'.format(name))
-    root_disk_id = create_disk_from_distro(vm_, node_id)['DiskID']
-    swap_disk_id = create_swap_disk(vm_, node_id)['DiskID']
-
     # Add private IP address if requested
     private_ip_assignment = get_private_ip(vm_)
     if private_ip_assignment:
@@ -450,12 +473,20 @@ def create(vm_):
         create_private_ip(node_id)
         private_ip_assignment = True
 
-    # Create a ConfigID using disk ids
-    config_id = create_config(kwargs={'name': name,
-                                      'linode_id': node_id,
-                                      'root_disk_id': root_disk_id,
-                                      'swap_disk_id': swap_disk_id,
-                                      'helper_network': private_ip_assignment})['ConfigID']
+    if cloning:
+        config_id = get_config_id(kwargs={'linode_id': node_id})['config_id']
+    else:
+        # Create disks and get ids
+        log.debug('Creating disks for {0}'.format(name))
+        root_disk_id = create_disk_from_distro(vm_, node_id)['DiskID']
+        swap_disk_id = create_swap_disk(vm_, node_id)['DiskID']
+
+        # Create a ConfigID using disk ids
+        config_id = create_config(kwargs={'name': name,
+                                          'linode_id': node_id,
+                                          'root_disk_id': root_disk_id,
+                                          'swap_disk_id': swap_disk_id})['ConfigID']
+
     # Boot the Linode
     boot(kwargs={'linode_id': node_id,
                  'config_id': config_id,
@@ -465,9 +496,9 @@ def create(vm_):
     ips = get_ips(node_id)
     state = int(node_data['STATUS'])
 
-    data['image'] = vm_['image']
-    data['name'] = node_data['LABEL']
-    data['size'] = node_data['TOTALRAM']
+    data['image'] = kwargs['image']
+    data['name'] = name
+    data['size'] = size
     data['state'] = _get_status_descr_by_id(state)
     data['private_ips'] = ips['private_ips']
     data['public_ips'] = ips['public_ips']
@@ -486,10 +517,10 @@ def create(vm_):
 
     ret.update(data)
 
-    log.info('Created Cloud VM \'{0[name]}\''.format(vm_))
+    log.info('Created Cloud VM \'{0}\''.format(name))
     log.debug(
-        '\'{0[name]}\' VM creation details:\n{1}'.format(
-            vm_, pprint.pformat(data)
+        '\'{0}\' VM creation details:\n{1}'.format(
+            name, pprint.pformat(data)
         )
     )
 
@@ -524,6 +555,11 @@ def create_config(kwargs=None, call=None):
     swap_disk_id
         The Swap Disk ID to be used for this config.
 
+    data_disk_id
+        The Data Disk ID to be used for this config.
+
+    .. versionadded:: Boron
+
     kernel_id
         The ID of the kernel to use for this configuration profile.
     '''
@@ -539,6 +575,7 @@ def create_config(kwargs=None, call=None):
     linode_id = kwargs.get('linode_id', None)
     root_disk_id = kwargs.get('root_disk_id', None)
     swap_disk_id = kwargs.get('swap_disk_id', None)
+    data_disk_id = kwargs.get('data_disk_id', None)
     kernel_id = kwargs.get('kernel_id', None)
 
     if kernel_id is None:
@@ -553,11 +590,15 @@ def create_config(kwargs=None, call=None):
                 '\'root_disk_id\', and \'swap_disk_id\'.'
             )
 
+    disklist = '{0},{1}'.format(root_disk_id, swap_disk_id)
+    if data_disk_id is not None:
+        disklist = '{0},{1},{2}'.format(root_disk_id, swap_disk_id, data_disk_id)
+
     config_args = {'LinodeID': linode_id,
                    'KernelID': kernel_id,
                    'Label': name,
-                   'DiskList': '{0},{1}'.format(root_disk_id, swap_disk_id)
-                   }
+                   'DiskList': disklist
+                  }
 
     result = _query('linode', 'config.create', args=config_args)
 
@@ -627,10 +668,38 @@ def create_swap_disk(vm_, linode_id, swap_size=None):
                    'Label': vm_['name'],
                    'Type': 'swap',
                    'Size': swap_size
-                   })
+                  })
 
     result = _query('linode', 'disk.create', args=kwargs)
 
+    return _clean_data(result)
+
+
+def create_data_disk(vm_=None, linode_id=None, data_size=None):
+    r'''
+    Create a data disk for the linode (type is hardcoded to ext4 at the moment)
+
+    .. versionadded:: Boron
+
+    vm\_
+        The VM profile to create the data disk for.
+
+    linode_id
+        The ID of the Linode to create the data disk for.
+
+    data_size
+        The size of the disk, in MB.
+
+    '''
+    kwargs = {}
+
+    kwargs.update({'LinodeID': linode_id,
+                   'Label': vm_['name']+"_data",
+                   'Type': 'ext4',
+                   'Size': data_size
+                  })
+
+    result = _query('linode', 'disk.create', args=kwargs)
     return _clean_data(result)
 
 
@@ -761,6 +830,19 @@ def get_disk_size(vm_, swap, linode_id):
     )
 
 
+def get_data_disk_size(vm_, swap, linode_id):
+    '''
+    Return the size of of the data disk in MB
+
+    .. versionadded:: Boron
+    '''
+    disk_size = get_linode(kwargs={'linode_id': linode_id})['TOTALHD']
+    root_disk_size = config.get_cloud_config_value(
+        'disk_size', vm_, __opts__, default=disk_size - swap
+    )
+    return disk_size - root_disk_size - swap
+
+
 def get_distribution_id(vm_):
     r'''
     Returns the distribution ID for a VM
@@ -780,8 +862,8 @@ def get_distribution_id(vm_):
 
     if not distro_id:
         raise SaltCloudNotFound(
-            'The DistributionID for the {0} profile could not be found.\n'
-            'The {1} instance could not be provisioned.'.format(
+            'The DistributionID for the \'{0}\' profile could not be found.\n'
+            'The \'{1}\' instance could not be provisioned.'.format(
                 vm_image_name,
                 vm_['name']
             )
@@ -801,7 +883,7 @@ def get_ips(linode_id=None):
         ips = _query('linode', 'ip.list')
 
     ips = ips['DATA']
-    all_ips = []
+    ret = {}
 
     for item in ips:
         node_id = str(item['LINODEID'])
@@ -810,20 +892,22 @@ def get_ips(linode_id=None):
         else:
             key = 'private_ips'
 
-        data = {node_id: {'public_ips': [], 'private_ips': []}}
-        data[node_id][key].append(item['IPADDRESS'])
-        all_ips.append(data)
+        if ret.get(node_id) is None:
+            ret.update({node_id: {'public_ips': [], 'private_ips': []}})
+        ret[node_id][key].append(item['IPADDRESS'])
 
     # If linode_id was specified, only return the ips, and not the
     # dictionary based on the linode ID as a key.
     if linode_id:
         _all_ips = {'public_ips': [], 'private_ips': []}
-        for item in all_ips:
-            for addr_type, addr_list in item.popitem()[1].items():
-                _all_ips[addr_type].extend(addr_list)
-        all_ips = _all_ips
+        matching_id = ret.get(str(linode_id))
+        if matching_id:
+            _all_ips['private_ips'] = matching_id['private_ips']
+            _all_ips['public_ips'] = matching_id['public_ips']
 
-    return all_ips
+        ret = _all_ips
+
+    return ret
 
 
 def get_linode(kwargs=None, call=None):
@@ -956,6 +1040,17 @@ def get_private_ip(vm_):
     )
 
 
+def get_data_disk(vm_):
+    '''
+    Return True if a data disk is requested
+
+    .. versionadded:: Boron
+    '''
+    return config.get_cloud_config_value(
+        'allocate_data_disk', vm_, __opts__, default=False
+    )
+
+
 def get_pub_key(vm_):
     r'''
     Return the SSH pubkey.
@@ -1084,6 +1179,15 @@ def list_nodes_min(call=None):
         ret[name] = this_node
 
     return ret
+
+
+def list_nodes_select(call=None):
+    '''
+    Return a list of the VMs that are on the provider, with select fields.
+    '''
+    return salt.utils.cloud.list_nodes_select(
+        list_nodes_full(), __opts__['query.selection'], call,
+    )
 
 
 def reboot(name, call=None):
@@ -1335,13 +1439,10 @@ def _list_linodes(full=False):
         state = int(node['STATUS'])
         this_node['state'] = _get_status_descr_by_id(state)
 
-        key = ''
-        for item in ips:
-            for id_ in item:
-                key = id_
+        for key, val in six.iteritems(ips):
             if key == linode_id:
-                this_node['private_ips'] = item[key]['private_ips']
-                this_node['public_ips'] = item[key]['public_ips']
+                this_node['private_ips'] = val['private_ips']
+                this_node['public_ips'] = val['public_ips']
 
         if full:
             this_node['extra'] = node
@@ -1361,8 +1462,12 @@ def _query(action=None,
     '''
     Make a web call to the Linode API.
     '''
+    global LASTCALL
     vm_ = get_configured_provider()
 
+    ratelimit_sleep = config.get_cloud_config_value(
+        'ratelimit_sleep', vm_, __opts__, search_global=False, default=0,
+    )
     apikey = config.get_cloud_config_value(
         'apikey', vm_, __opts__, search_global=False
     )
@@ -1386,6 +1491,10 @@ def _query(action=None,
     if method == 'DELETE':
         decode = False
 
+    now = int(time.mktime(datetime.datetime.now().timetuple()))
+    if LASTCALL >= now:
+        time.sleep(ratelimit_sleep)
+
     result = salt.utils.http.query(
         url,
         method,
@@ -1399,6 +1508,7 @@ def _query(action=None,
         hide_fields=['api_key', 'rootPass'],
         opts=__opts__,
     )
+    LASTCALL = int(time.mktime(datetime.datetime.now().timetuple()))
     log.debug(
         'Linode Response Status Code: {0}'.format(
             result['status']

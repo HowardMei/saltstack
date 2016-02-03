@@ -33,6 +33,7 @@ HAS_ZYPP = False
 ZYPP_HOME = '/etc/zypp'
 LOCKS = '{0}/locks'.format(ZYPP_HOME)
 REPOS = '{0}/repos.d'.format(ZYPP_HOME)
+DEFAULT_PRIORITY = 99
 
 # Define the module's virtual name
 __virtualname__ = 'pkg'
@@ -43,10 +44,10 @@ def __virtual__():
     Set the virtual pkg module if the os is openSUSE
     '''
     if __grains__.get('os_family', '') != 'Suse':
-        return False
+        return (False, "Module zypper: non SUSE OS not suppored by zypper package manager")
     # Not all versions of Suse use zypper, check that it is available
     if not salt.utils.which('zypper'):
-        return False
+        return (False, "Module zypper: zypper package manager not found")
     return __virtualname__
 
 
@@ -98,9 +99,28 @@ def list_upgrades(refresh=True):
 list_updates = salt.utils.alias_function(list_upgrades, 'list_updates')
 
 
-def info_installed(*names):
+def info_installed(*names, **kwargs):
     '''
     Return the information of the named package(s), installed on the system.
+
+    :param names:
+        Names of the packages to get information about.
+
+    :param attr:
+        Comma-separated package attributes. If no 'attr' is specified, all available attributes returned.
+
+        Valid attributes are:
+            version, vendor, release, build_date, build_date_time_t, install_date, install_date_time_t,
+            build_host, group, source_rpm, arch, epoch, size, license, signature, packager, url,
+            summary, description.
+
+    :param errors:
+        Handle RPM field errors (true|false). By default, various mistakes in the textual fields are simply ignored and
+        omitted from the data. Otherwise a field with a mistake is not returned, instead a 'N/A (bad UTF-8)'
+        (not available, broken) text is returned.
+
+        Valid attributes are:
+            ignore, report
 
     CLI example:
 
@@ -108,12 +128,21 @@ def info_installed(*names):
 
         salt '*' pkg.info_installed <package1>
         salt '*' pkg.info_installed <package1> <package2> <package3> ...
+        salt '*' pkg.info_installed <package1> attr=version,vendor
+        salt '*' pkg.info_installed <package1> <package2> <package3> ... attr=version,vendor
+        salt '*' pkg.info_installed <package1> <package2> <package3> ... attr=version,vendor errors=true
     '''
     ret = dict()
-    for pkg_name, pkg_nfo in __salt__['lowpkg.info'](*names).items():
+    for pkg_name, pkg_nfo in __salt__['lowpkg.info'](*names, **kwargs).items():
         t_nfo = dict()
         # Translate dpkg-specific keys to a common structure
         for key, value in pkg_nfo.items():
+            if type(value) == str:
+                # Check, if string is encoded in a proper UTF-8
+                value_ = value.decode('UTF-8', 'ignore').encode('UTF-8', 'ignore')
+                if value != value_:
+                    value = kwargs.get('errors') and value_ or 'N/A (invalid UTF-8)'
+                    log.error('Package {0} has bad UTF-8 code in {1}: {2}'.format(pkg_name, key, value))
             if key == 'source_rpm':
                 t_nfo['source'] = value
             else:
@@ -156,7 +185,7 @@ def info_available(*names, **kwargs):
         cmd.extend(batch[:batch_size])
         pkg_info.extend(
             re.split(
-                '----*',
+                'Information for package*',
                 __salt__['cmd.run_stdout'](
                     cmd,
                     output_loglevel='trace',
@@ -169,6 +198,8 @@ def info_available(*names, **kwargs):
     for pkg_data in pkg_info:
         nfo = {}
         for line in [data for data in pkg_data.split('\n') if ':' in data]:
+            if line.startswith('-----'):
+                continue
             kw = [data.strip() for data in line.split(':', 1)]
             if len(kw) == 2 and kw[1]:
                 nfo[kw[0].lower()] = kw[1]
@@ -226,7 +257,8 @@ def latest_version(*names, **kwargs):
     package_info = info_available(*names)
     for name in names:
         pkg_info = package_info.get(name, {})
-        if pkg_info.get('status', '').lower() in ['not installed', 'out-of-date']:
+        status = pkg_info.get('status', '').lower()
+        if status.find('not installed') > -1 or status.find('out-of-date') > -1:
             ret[name] = pkg_info.get('version')
 
     # Return a string if only one package name passed
@@ -295,7 +327,7 @@ def list_pkgs(versions_as_list=False, **kwargs):
             __salt__['pkg_resource.stringify'](ret)
             return ret
 
-    cmd = ['rpm', '-qa', '--queryformat', '%{NAME}_|-%{VERSION}_|-%{RELEASE}\\n']
+    cmd = ['rpm', '-qa', '--queryformat', '%{NAME}_|-%{VERSION}_|-%{RELEASE}_|-%|EPOCH?{%{EPOCH}}:{}|\\n']
     ret = {}
     out = __salt__['cmd.run'](
         cmd,
@@ -303,7 +335,9 @@ def list_pkgs(versions_as_list=False, **kwargs):
         python_shell=False
     )
     for line in out.splitlines():
-        name, pkgver, rel = line.split('_|-')
+        name, pkgver, rel, epoch = line.split('_|-')
+        if epoch:
+            pkgver = '{0}:{1}'.format(epoch, pkgver)
         if rel:
             pkgver += '-{0}'.format(rel)
         __salt__['pkg_resource.add_pkg'](ret, name, pkgver)
@@ -538,6 +572,12 @@ def mod_repo(repo, **kwargs):
     if kwargs.get('gpgautoimport') is True:
         cmd_opt.append('--gpg-auto-import-keys')
 
+    if 'priority' in kwargs:
+        cmd_opt.append("--priority='{0}'".format(kwargs.get('priority', DEFAULT_PRIORITY)))
+
+    if 'humanname' in kwargs:
+        cmd_opt.append("--name='{0}'".format(kwargs.get('humanname')))
+
     if cmd_opt:
         cmd = ['zypper', '-x', 'mr']
         cmd.extend(cmd_opt)
@@ -603,6 +643,7 @@ def install(name=None,
             sources=None,
             downloadonly=None,
             skip_verify=False,
+            version=None,
             **kwargs):
     '''
     Install the passed package(s), add refresh=True to run 'zypper refresh'
@@ -674,23 +715,20 @@ def install(name=None,
                        'new': '<new-version>'}}
     '''
     try:
-        pkg_params, pkg_type = __salt__['pkg_resource.parse_targets'](
-            name, pkgs, sources, **kwargs
-        )
+        pkg_params, pkg_type = __salt__['pkg_resource.parse_targets'](name, pkgs, sources, **kwargs)
     except MinionError as exc:
         raise CommandExecutionError(exc)
 
     if pkg_params is None or len(pkg_params) == 0:
         return {}
 
-    version_num = kwargs.get('version')
+    version_num = version
     if version_num:
         if pkgs is None and sources is None:
             # Allow "version" to work for single package target
             pkg_params = {name: version_num}
         else:
-            log.warning('\'version\' parameter will be ignored for multiple '
-                        'package targets')
+            log.warning("'version' parameter will be ignored for multiple package targets")
 
     if pkg_type == 'repository':
         targets = []
@@ -699,18 +737,13 @@ def install(name=None,
             if version_num is None:
                 targets.append(param)
             else:
-                match = re.match('^([<>])?(=)?([^<>=]+)$', version_num)
+                match = re.match(r'^([<>])?(=)?([^<>=]+)$', version_num)
                 if match:
                     gt_lt, equal, verstr = match.groups()
-                    prefix = gt_lt or ''
-                    prefix += equal or ''
-                    # If no prefix characters were supplied, use '='
-                    prefix = prefix or '='
-                    targets.append('{0}{1}{2}'.format(param, prefix, verstr))
+                    targets.append('{0}{1}{2}'.format(param, ((gt_lt or '') + (equal or '')) or '=', verstr))
                     log.debug(targets)
                 else:
-                    msg = ('Invalid version string \'{0}\' for package '
-                           '\'{1}\''.format(version_num, name))
+                    msg = ('Invalid version string {0!r} for package {1!r}'.format(version_num, name))
                     problems.append(msg)
         if problems:
             for problem in problems:
@@ -736,33 +769,44 @@ def install(name=None,
         cmd_install.append('--download-only')
     if fromrepo:
         cmd_install.extend(fromrepoopt)
+
+    errors = []
+
     # Split the targets into batches of 500 packages each, so that
     # the maximal length of the command line is not broken
     while targets:
         cmd = cmd_install + targets[:500]
         targets = targets[500:]
-
-        out = __salt__['cmd.run'](
-            cmd,
-            output_loglevel='trace',
-            python_shell=False
-        )
-        for line in out.splitlines():
-            match = re.match(
-                "^The selected package '([^']+)'.+has lower version",
-                line
-            )
-            if match:
-                downgrades.append(match.group(1))
+        call = __salt__['cmd.run_all'](cmd, output_loglevel='trace', python_shell=False)
+        if call['retcode'] != 0:
+            raise CommandExecutionError(call['stderr'])  # Fixme: This needs a proper report mechanism.
+        else:
+            for line in call['stdout'].splitlines():
+                match = re.match(r"^The selected package '([^']+)'.+has lower version", line)
+                if match:
+                    downgrades.append(match.group(1))
 
     while downgrades:
         cmd = cmd_install + ['--force'] + downgrades[:500]
         downgrades = downgrades[500:]
-        __salt__['cmd.run'](cmd, output_loglevel='trace', python_shell=False)
+        out = __salt__['cmd.run_all'](cmd,
+                                      output_loglevel='trace',
+                                      python_shell=False)
+
+        if out['retcode'] != 0 and out['stderr']:
+            errors.append(out['stderr'])
 
     __context__.pop('pkg.list_pkgs', None)
     new = list_pkgs()
-    return salt.utils.compare_dicts(old, new)
+    ret = salt.utils.compare_dicts(old, new)
+
+    if errors:
+        raise CommandExecutionError(
+            'Problem encountered installing package(s)',
+            info={'errors': errors, 'changes': ret}
+        )
+
+    return ret
 
 
 def upgrade(refresh=True, skip_verify=False):
@@ -802,18 +846,19 @@ def upgrade(refresh=True, skip_verify=False):
     call = __salt__['cmd.run_all'](
         cmd,
         output_loglevel='trace',
-        python_shell=False
+        python_shell=False,
+        redirect_stderr=True
     )
+
     if call['retcode'] != 0:
         ret['result'] = False
-        if call['stderr']:
-            ret['comment'] += call['stderr']
         if call['stdout']:
-            ret['comment'] += call['stdout']
-    else:
-        __context__.pop('pkg.list_pkgs', None)
-        new = list_pkgs()
-        ret['changes'] = salt.utils.compare_dicts(old, new)
+            ret['comment'] = call['stdout']
+
+    __context__.pop('pkg.list_pkgs', None)
+    new = list_pkgs()
+    ret['changes'] = salt.utils.compare_dicts(old, new)
+
     return ret
 
 
@@ -831,16 +876,33 @@ def _uninstall(action='remove', name=None, pkgs=None):
     targets = [x for x in pkg_params if x in old]
     if not targets:
         return {}
+
+    errors = []
     while targets:
         cmd = ['zypper', '--non-interactive', 'remove']
         if action == 'purge':
             cmd.append('-u')
         cmd.extend(targets[:500])
-        __salt__['cmd.run'](cmd, output_loglevel='trace', python_shell=False)
+        out = __salt__['cmd.run_all'](cmd,
+                                      output_loglevel='trace',
+                                      python_shell=False)
+
+        if out['retcode'] != 0 and out['stderr']:
+            errors.append(out['stderr'])
+
         targets = targets[500:]
+
     __context__.pop('pkg.list_pkgs', None)
     new = list_pkgs()
-    return salt.utils.compare_dicts(old, new)
+    ret = salt.utils.compare_dicts(old, new)
+
+    if errors:
+        raise CommandExecutionError(
+            'Problem encountered removing package(s)',
+            info={'errors': errors, 'changes': ret}
+        )
+
+    return ret
 
 
 def remove(name=None, pkgs=None, **kwargs):  # pylint: disable=unused-argument
@@ -1245,54 +1307,32 @@ def _get_first_aggregate_text(node_list):
     return '\n'.join(out)
 
 
-def _parse_suse_product(path, *info):
+def list_products(all=False):
     '''
-    Parse SUSE LLC product.
-    '''
-    doc = dom.parse(path)
-    product = {}
-    for nfo in info:
-        product.update(
-            {nfo: _get_first_aggregate_text(
-                doc.getElementsByTagName(nfo)
-            )}
-        )
+    List all available or installed SUSE products.
 
-    return product
-
-
-def list_products():
-    '''
-    List all installed SUSE products.
+    all
+        List all products available or only installed. Default is False.
 
     CLI Examples:
 
     .. code-block:: bash
 
         salt '*' pkg.list_products
+        salt '*' pkg.list_products all=True
     '''
-    products_dir = '/etc/products.d'
-    if not os.path.exists(products_dir):
-        raise CommandExecutionError(
-            'Directory {0} does not exist'.format(products_dir)
-        )
-
-    p_data = {}
-    for fname in os.listdir(products_dir):
-        pth_name = os.path.join(products_dir, fname)
-        r_pth_name = os.path.realpath(pth_name)
-        p_data[r_pth_name] = r_pth_name != pth_name and 'baseproduct' or None
-
-    info = ['vendor', 'name', 'version', 'baseversion', 'patchlevel',
-            'predecessor', 'release', 'endoflife', 'arch', 'cpeid',
-            'productline', 'updaterepokey', 'summary', 'shortsummary',
-            'description']
-
-    ret = {}
-    for prod_meta, is_base_product in six.iteritems(p_data):
-        product = _parse_suse_product(prod_meta, *info)
-        product['baseproduct'] = is_base_product is not None
-        ret[product.pop('name')] = product
+    ret = list()
+    doc = dom.parseString(__salt__['cmd.run'](("zypper -x products{0}".format(not all and ' -i' or '')),
+                                              output_loglevel='trace'))
+    for prd in doc.getElementsByTagName('product-list')[0].getElementsByTagName('product'):
+        p_data = dict()
+        p_nfo = dict(prd.attributes.items())
+        p_name = p_nfo.pop('name')
+        p_data[p_name] = p_nfo
+        p_data[p_name]['eol'] = prd.getElementsByTagName('endoflife')[0].getAttribute('text')
+        descr = _get_first_aggregate_text(prd.getElementsByTagName('description'))
+        p_data[p_name]['description'] = " ".join([line.strip() for line in descr.split(os.linesep)])
+        ret.append(p_data)
 
     return ret
 

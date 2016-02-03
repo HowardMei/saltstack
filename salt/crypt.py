@@ -8,11 +8,13 @@ authenticating peers
 from __future__ import absolute_import, print_function
 import os
 import sys
+import copy
 import time
 import hmac
 import base64
 import hashlib
 import logging
+import stat
 import traceback
 import binascii
 import weakref
@@ -58,8 +60,11 @@ def dropfile(cachedir, user=None):
     try:
         log.info('Rotating AES key')
 
+        if os.path.isfile(dfn) and not os.access(dfn, os.W_OK):
+            os.chmod(dfn, stat.S_IRUSR | stat.S_IWUSR)
         with salt.utils.fopen(dfn, 'wb+') as fp_:
             fp_.write('')
+        os.chmod(dfn, stat.S_IRUSR)
         if user:
             try:
                 import pwd
@@ -376,6 +381,19 @@ class AsyncAuth(object):
             self._authenticate_future.set_result(True)
         else:
             self.authenticate()
+
+    def __deepcopy__(self, memo):
+        cls = self.__class__
+        result = cls.__new__(cls, copy.deepcopy(self.opts, memo), io_loop=None)
+        memo[id(self)] = result
+        for key in self.__dict__:
+            if key in ('io_loop',):
+                # The io_loop has a thread Lock which will fail to be deep
+                # copied. Skip it because it will just be recreated on the
+                # new copy.
+                continue
+            setattr(result, key, copy.deepcopy(self.__dict__[key], memo))
+        return result
 
     @property
     def creds(self):

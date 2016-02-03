@@ -238,23 +238,20 @@ A more complex ``recurse`` example:
 from __future__ import absolute_import
 import difflib
 import itertools
-import json
 import logging
 import os
-import pprint
 import shutil
 import traceback
-import yaml
 from collections import Iterable, Mapping
 
 # Import salt libs
+import salt.loader
 import salt.payload
 import salt.utils
 import salt.utils.templates
 import salt.utils.url
+from salt.utils.locales import sdecode
 from salt.exceptions import CommandExecutionError
-from salt.serializers import yaml as yaml_serializer
-from salt.serializers import json as json_serializer
 
 # Import 3rd-party libs
 import salt.ext.six as six
@@ -263,6 +260,7 @@ from salt.ext.six.moves import zip_longest
 log = logging.getLogger(__name__)
 
 COMMENT_REGEX = r'^([[:space:]]*){0}[[:space:]]?'
+__NOT_FOUND = object()
 
 
 def _get_accumulator_filepath():
@@ -433,7 +431,7 @@ def _clean_dir(root, keep, exclude_pat):
                 try:
                     os.remove(nfn)
                 except OSError:
-                    shutil.rmtree(nfn)
+                    __salt__['file.remove'](nfn)
 
     for roots, dirs, files in os.walk(root):
         for name in itertools.chain(dirs, files):
@@ -467,37 +465,42 @@ def _check_directory(name,
             walk_d[i[0]] = (i[1], i[2])
 
     if recurse:
-        if not set(['user', 'group', 'mode']) >= set(recurse):
-            return False, 'Types for "recurse" limited to "user", ' \
-                          '"group" and "mode"', changes
-        if 'user' not in recurse:
+        try:
+            recurse_set = _get_recurse_set(recurse)
+        except (TypeError, ValueError) as exc:
+            return False, '{0}'.format(exc), changes
+        if 'user' not in recurse_set:
             user = None
-        if 'group' not in recurse:
+        if 'group' not in recurse_set:
             group = None
-        if 'mode' not in recurse:
+        if 'mode' not in recurse_set:
             mode = None
+        check_files = 'ignore_files' not in recurse_set
+        check_dirs = 'ignore_dirs' not in recurse_set
         for root, dirs, files in walk_l:
-            for fname in files:
-                fchange = {}
-                path = os.path.join(root, fname)
-                stats = __salt__['file.stats'](
-                    path, None, follow_symlinks=False
-                )
-                if user is not None and user != stats.get('user'):
-                    fchange['user'] = user
-                if group is not None and group != stats.get('group'):
-                    fchange['group'] = group
-                if fchange:
-                    changes[path] = fchange
-            for name_ in dirs:
-                path = os.path.join(root, name_)
-                fchange = _check_dir_meta(path, user, group, mode)
-                if fchange:
-                    changes[path] = fchange
-    else:
-        fchange = _check_dir_meta(name, user, group, mode)
-        if fchange:
-            changes[name] = fchange
+            if check_files:
+                for fname in files:
+                    fchange = {}
+                    path = os.path.join(root, fname)
+                    stats = __salt__['file.stats'](
+                        path, None, follow_symlinks=False
+                    )
+                    if user is not None and user != stats.get('user'):
+                        fchange['user'] = user
+                    if group is not None and group != stats.get('group'):
+                        fchange['group'] = group
+                    if fchange:
+                        changes[path] = fchange
+            if check_dirs:
+                for name_ in dirs:
+                    path = os.path.join(root, name_)
+                    fchange = _check_dir_meta(path, user, group, mode)
+                    if fchange:
+                        changes[path] = fchange
+    # Recurse skips root (we always do dirs, not root), so always check root:
+    fchange = _check_dir_meta(name, user, group, mode)
+    if fchange:
+        changes[name] = fchange
     if clean:
         keep = _gen_keep_files(name, require, walk_d)
 
@@ -541,9 +544,13 @@ def _check_dir_meta(name,
     if not stats:
         changes['directory'] = 'new'
         return changes
-    if user is not None and user != stats['user']:
+    if (user is not None
+            and user != stats['user']
+            and user != stats.get('uid')):
         changes['user'] = user
-    if group is not None and group != stats['group']:
+    if (group is not None
+            and group != stats['group']
+            and group != stats.get('gid')):
         changes['group'] = group
     # Normalize the dir mode
     smode = __salt__['config.manage_mode'](stats['mode'])
@@ -917,23 +924,16 @@ def symlink(
                     return _error(ret, ((
                                             'File exists where the backup target {0} should go'
                                         ).format(backupname)))
-                elif os.path.isfile(backupname):
-                    os.remove(backupname)
-                elif os.path.isdir(backupname):
-                    shutil.rmtree(backupname)
                 else:
-                    return _error(ret, ((
-                                            'Something exists where the backup target {0}'
-                                            'should go'
-                                        ).format(backupname)))
+                    __salt__['file.remove'](backupname)
             os.rename(name, backupname)
         elif force:
             # Remove whatever is in the way
-            if os.path.isfile(name):
-                os.remove(name)
+            if __salt__['file.is_link'](name):
+                __salt__['file.remove'](name)
                 ret['changes']['forced'] = 'Symlink was forcibly replaced'
             else:
-                shutil.rmtree(name)
+                __salt__['file.remove'](name)
         else:
             # Otherwise throw an error
             if os.path.isfile(name):
@@ -971,7 +971,7 @@ def absent(name):
     '''
     Make sure that the named file or directory is absent. If it exists, it will
     be deleted. This will work to reverse any of the functions in the file
-    state module.
+    state module. If a directory is supplied, it will be recursively deleted.
 
     name
         The path which should be deleted
@@ -1012,7 +1012,7 @@ def absent(name):
             ret['comment'] = 'Directory {0} is set for removal'.format(name)
             return ret
         try:
-            shutil.rmtree(name)
+            __salt__['file.remove'](name)
             ret['comment'] = 'Removed directory {0}'.format(name)
             ret['changes']['removed'] = name
             return ret
@@ -1087,12 +1087,15 @@ def managed(name,
             defaults=None,
             env=None,
             backup='',
-            show_diff=True,
+            show_diff=None,
+            show_changes=True,
             create=True,
             contents=None,
             contents_pillar=None,
             contents_grains=None,
             contents_newline=True,
+            contents_delimiter=':',
+            allow_empty=True,
             follow_symlinks=True,
             check_cmd=None,
             **kwargs):
@@ -1122,7 +1125,9 @@ def managed(name,
 
         A list of sources can also be passed in to provide a default source and
         a set of fallbacks. The first source in the list that is found to exist
-        will be used and subsequent entries in the list will be ignored.
+        will be used and subsequent entries in the list will be ignored. Source
+        list functionality only supports local files and remote files hosted on
+        the salt master server or retrievable via HTTP, HTTPS, or FTP.
 
         .. code-block:: yaml
 
@@ -1225,21 +1230,20 @@ def managed(name,
         used to render the downloaded file, currently jinja, mako, and wempy
         are supported
 
-    makedirs
-        If the file is located in a path without a parent directory, then
-        the state will fail. If makedirs is set to True, then the parent
-        directories will be created to facilitate the creation of the named
-        file.
+    makedirs : False
+        If set to ``True``, then the parent directories will be created to
+        facilitate the creation of the named file. If ``False``, and the parent
+        directory of the destination file doesn't exist, the state will fail.
 
     dir_mode
         If directories are to be created, passing this option specifies the
         permissions for those directories. If this is not set, directories
         will be assigned permissions from the 'mode' argument.
 
-    replace
-        If this file should be replaced.  If false, this command will
-        not overwrite file contents but will enforce permissions if the file
-        exists already.  Default is True.
+    replace : True
+        If set to ``False`` and the file already exists, the file will not be
+        modified even if changes would otherwise be made. Permissions and
+        ownership will still be enforced, however.
 
     context
         Overrides default context variables passed to the template.
@@ -1251,16 +1255,42 @@ def managed(name,
         Overrides the default backup mode for this specific file.
 
     show_diff
-        If set to False, the diff will not be shown.
+        DEPRECATED: Please use show_changes.
 
-    create
-        Default is True, if create is set to False then the file will only be
-        managed if the file already exists on the system.
+        If set to ``False``, the diff will not be shown in the return data if
+        changes are made.
+
+    show_changes
+        Output a unified diff of the old file and the new file. If ``False``
+        return a boolean if any changes were made.
+
+    create : True
+        If set to ``False``, then the file will only be managed if the file
+        already exists on the system.
 
     contents
-        Default is None.  If specified, will use the given string as the
-        contents of the file.  Should not be used in conjunction with a source
-        file of any kind.  Ignores hashes and does not use a templating engine.
+        Specify the contents of the file. Cannot be used in combination with
+        ``source``. Ignores hashes and does not use a templating engine.
+
+        This value can be either a single string, a multiline YAML string or a
+        list of strings.  If a list of strings, then the strings will be joined
+        together with newlines in the resulting file. For example, the below
+        two example states would result in identical file contents:
+
+        .. code-block:: yaml
+
+            /path/to/file1:
+              file.managed:
+                - contents:
+                  - This is line 1
+                  - This is line 2
+
+            /path/to/file2:
+              file.managed:
+                - contents: |
+                  This is line 1
+                  This is line 2
+
 
     contents_pillar
         .. versionadded:: 0.17.0
@@ -1306,18 +1336,40 @@ def managed(name,
             pipe character, and the mutliline string is indented two more
             spaces.
 
+            To avoid the hassle of creating an indented multiline YAML string,
+            the :mod:`file_tree external pillar <salt.pillar.file_tree>` can
+            be used instead. However, this will not work for binary files in
+            Salt releases before 2015.8.4.
+
     contents_grains
         .. versionadded:: 2014.7.0
 
-        Same as contents_pillar, but with grains
+        Same as ``contents_pillar``, but with grains
 
-    contents_newline
+    contents_newline : True
         .. versionadded:: 2014.7.0
+        .. versionchanged:: 2015.8.4
+            This option is now ignored if the contents being deployed contain
+            binary data.
 
-        When using contents, contents_pillar, or contents_grains, this option
-        ensures the file will have a newline at the end.
-        When loading some data this newline is better left off. Setting
-        contents_newline to False will omit this final newline.
+        If ``True``, files managed using ``contents``, ``contents_pillar``, or
+        ``contents_grains`` will have a newline added to the end of the file if
+        one is not present. Setting this option to ``False`` will omit this
+        final newline.
+
+    contents_delimiter
+        .. versionadded:: 2015.8.4
+
+        Can be used to specify an alternate delimiter for ``contents_pillar``
+        or ``contents_grains``. This delimiter will be passed through to
+        :py:func:`pillar.get <salt.modules.pillar.get>` or :py:func:`grains.get
+        <salt.modules.grains.get>` when retrieving the contents.
+
+    allow_empty : True
+        .. versionadded:: 2015.8.4
+
+        If set to ``False``, then the state will fail if the contents specified
+        by ``contents_pillar`` or ``contents_grains`` are empty.
 
     follow_symlinks : True
         .. versionadded:: 2014.7.0
@@ -1331,8 +1383,22 @@ def managed(name,
         The specified command will be run with an appended argument of a *temporary*
         file containing the new managed contents.  If the command exits with a zero
         status the new managed contents will be written to the managed destination.
-        If the command exits with a nonzero exit code, the new managed contents will
-        be discarded.
+        If the command exits with a nonzero exit code, the state will fail and
+        no changes will be made to the file.
+
+        For example, the following could be used to verify sudoers before making
+        changes:
+
+        .. code-block:: yaml
+
+            /etc/sudoers:
+              file.managed:
+                - user: root
+                - group: root
+                - mode: 0440
+                - source: salt://sudoers/files/sudoers.jinja
+                - template: jinja
+                - check_cmd: /usr/sbin/visudo -c -f
 
         **NOTE**: This ``check_cmd`` functions differently than the requisite
         ``check_cmd``.
@@ -1345,42 +1411,97 @@ def managed(name,
            'name': name,
            'result': True}
 
-    # If no source is specified, set replace to False, as there is nothing
-    # to replace the file with.
-    src_defined = source or contents is not None or contents_pillar or contents_grains
-    if not src_defined and replace:
-        replace = False
-        log.warning(
-            'Neither \'source\' nor \'contents\' nor \'contents_pillar\' nor \'contents_grains\' '
-            'was defined, yet \'replace\' was set to \'True\'. As there is '
-            'no source to replace the file with, \'replace\' has been set '
-            'to \'False\' to avoid reading the file unnecessarily'
+    contents_count = len(
+        [x for x in (contents, contents_pillar, contents_grains) if x]
+    )
+
+    if source and contents_count > 0:
+        return _error(
+            ret,
+            '\'source\' cannot be used in combination with \'contents\', '
+            '\'contents_pillar\', or \'contents_grains\''
+        )
+    elif contents_count > 1:
+        return _error(
+            ret,
+            'Only one of \'contents\', \'contents_pillar\', and '
+            '\'contents_grains\' is permitted'
         )
 
-    if len([_f for _f in [contents, contents_pillar, contents_grains] if _f]) > 1:
-        return _error(
-            ret, 'Only one of contents, contents_pillar, and contents_grains is permitted')
+    # If no source is specified, set replace to False, as there is nothing
+    # with which to replace the file.
+    if not source and contents_count == 0 and replace:
+        replace = False
+        log.warning(
+            'Neither \'source\' nor \'contents\' nor \'contents_pillar\' nor '
+            '\'contents_grains\' was defined, yet \'replace\' was set to '
+            '\'True\'. As there is no source to replace the file with, '
+            '\'replace\' has been set to \'False\' to avoid reading the file '
+            'unnecessarily.'
+        )
 
+    # Use this below to avoid multiple '\0' checks and save some CPU cycles
+    contents_are_binary = False
     if contents_pillar:
-        contents = __salt__['pillar.get'](contents_pillar)
-        if not contents:
-            return _error(ret, 'contents_pillar {0} results in empty contents'.format(contents_pillar))
-    if contents_grains:
-        contents = __salt__['grains.get'](contents_grains)
-        if not contents:
-            return _error(ret, 'contents_grain {0} results in empty contents'.format(contents_grains))
+        contents = __salt__['pillar.get'](contents_pillar, __NOT_FOUND)
+        if contents is __NOT_FOUND:
+            return _error(
+                ret,
+                'Pillar {0} does not exist'.format(contents_pillar)
+            )
+        try:
+            if '\0' in contents:
+                contents_are_binary = True
+        except TypeError:
+            contents = str(contents)
+        if not allow_empty and not contents:
+            return _error(
+                ret,
+                'contents_pillar {0} results in empty contents'
+                .format(contents_pillar)
+            )
 
-    # ensure contents is a string
-    if contents:
-        validated_contents = _validate_str_list(contents)
-        if not validated_contents:
-            return _error(ret, '"contents" is not a string or list of strings')
-        if isinstance(validated_contents, list):
+    elif contents_grains:
+        contents = __salt__['grains.get'](contents_grains, __NOT_FOUND)
+        if contents is __NOT_FOUND:
+            return _error(
+                ret,
+                'Grain {0} does not exist'.format(contents_grains)
+            )
+        try:
+            if '\0' in contents:
+                contents_are_binary = True
+        except TypeError:
+            contents = str(contents)
+        if not allow_empty and not contents:
+            return _error(
+                ret,
+                'contents_grains {0} results in empty contents'
+                .format(contents_grains)
+            )
+
+    elif contents:
+        try:
+            if '\0' in contents:
+                contents_are_binary = True
+        except TypeError:
+            pass
+        if not contents_are_binary:
+            validated_contents = _validate_str_list(contents)
+            if not validated_contents:
+                return _error(
+                    ret,
+                    '\'contents\' is not a string or list of strings'
+                )
             contents = os.linesep.join(validated_contents)
-        if contents_newline:
-            # Make sure file ends in newline
-            if contents and not contents.endswith(os.linesep):
-                contents += os.linesep
+
+    # If either contents_pillar or contents_grains were used, the contents
+    # variable now contains the value loaded from pillar/grains.
+    if contents \
+            and not contents_are_binary \
+            and contents_newline \
+            and not contents.endswith(os.linesep):
+        contents += os.linesep
 
     # Make sure that leading zeros stripped by YAML loader are added back
     mode = __salt__['config.manage_mode'](mode)
@@ -1468,15 +1589,23 @@ def managed(name,
     else:
         ret['pchanges'] = {}
 
+    if show_diff is not None:
+        show_changes = show_diff
+        msg = (
+            'The \'show_diff\' argument to the file.managed state has been '
+            'deprecated, please use \'show_changes\' instead.'
+        )
+        salt.utils.warn_until('Boron', msg)
+
     try:
         if __opts__['test']:
             if ret['pchanges']:
                 ret['result'] = None
                 ret['comment'] = 'The file {0} is set to be changed'.format(name)
-                if show_diff and 'diff' in ret['pchanges']:
+                if show_changes and 'diff' in ret['pchanges']:
                     ret['changes']['diff'] = ret['pchanges']['diff']
-                if not show_diff:
-                    ret['changes']['diff'] = '<show_diff=False>'
+                if not show_changes:
+                    ret['changes']['diff'] = '<show_changes=False>'
             else:
                 ret['result'] = True
                 ret['comment'] = 'The file {0} is in the correct state'.format(name)
@@ -1524,7 +1653,12 @@ def managed(name,
             try:
                 __salt__['file.copy'](name, tmp_filename)
             except Exception as exc:
-                return _error(ret, 'Unable to copy file {0} to {1}: {2}'.format(name, tmp_filename, exc))
+                return _error(
+                    ret,
+                    'Unable to copy file {0} to {1}: {2}'.format(
+                        name, tmp_filename, exc
+                    )
+                )
 
         try:
             ret = __salt__['file.manage_file'](
@@ -1607,6 +1741,32 @@ def managed(name,
         finally:
             if tmp_filename and os.path.isfile(tmp_filename):
                 os.remove(tmp_filename)
+
+
+_RECURSE_TYPES = ['user', 'group', 'mode', 'ignore_files', 'ignore_dirs']
+
+
+def _get_recurse_set(recurse):
+    '''
+    Converse *recurse* definition to a set of strings.
+
+    Raises TypeError or ValueError when *recurse* has wrong structure.
+    '''
+    if not recurse:
+        return set()
+    if not isinstance(recurse, list):
+        raise TypeError('"recurse" must be formed as a list of strings')
+    try:
+        recurse_set = set(recurse)
+    except TypeError:  # non-hashable elements
+        recurse_set = None
+    if recurse_set is None or not set(_RECURSE_TYPES) >= recurse_set:
+        raise ValueError('Types for "recurse" limited to {0}.'.format(
+            ', '.join('"{0}"'.format(rtype) for rtype in _RECURSE_TYPES)))
+    if 'ignore_files' in recurse_set and 'ignore_dirs' in recurse_set:
+        raise ValueError('Must not specify "recurse" options "ignore_files"'
+                         ' and "ignore_dirs" at the same time.')
+    return recurse_set
 
 
 def directory(name,
@@ -1782,28 +1942,19 @@ def directory(name,
                     return _error(ret, ((
                                             'File exists where the backup target {0} should go'
                                         ).format(backupname)))
-                elif os.path.isfile(backupname):
-                    os.remove(backupname)
-                elif os.path.islink(backupname):
-                    os.remove(backupname)
-                elif os.path.isdir(backupname):
-                    shutil.rmtree(backupname)
                 else:
-                    return _error(ret, ((
-                                            'Something exists where the backup target {0}'
-                                            'should go'
-                                        ).format(backupname)))
+                    __salt__['file.remove'](backupname)
             os.rename(name, backupname)
         elif force:
             # Remove whatever is in the way
             if os.path.isfile(name):
                 os.remove(name)
                 ret['changes']['forced'] = 'File was forcibly replaced'
-            elif os.path.islink(name):
-                os.remove(name)
+            elif __salt__['file.is_link'](name):
+                __salt__['file.remove'](name)
                 ret['changes']['forced'] = 'Symlink was forcibly replaced'
             else:
-                shutil.rmtree(name)
+                __salt__['file.remove'](name)
         else:
             if os.path.isfile(name):
                 return _error(
@@ -1871,91 +2022,77 @@ def directory(name,
         for i in walk_l:
             walk_d[i[0]] = (i[1], i[2])
 
+    recurse_set = None
     if recurse:
-        if not isinstance(recurse, list):
+        try:
+            recurse_set = _get_recurse_set(recurse)
+        except (TypeError, ValueError) as exc:
             ret['result'] = False
-            ret['comment'] = '"recurse" must be formed as a list of strings'
-        elif not set(['user', 'group', 'mode', 'ignore_files',
-                      'ignore_dirs']) >= set(recurse):
-            ret['result'] = False
-            ret['comment'] = 'Types for "recurse" limited to "user", ' \
-                             '"group", "mode", "ignore_files, and "ignore_dirs"'
-        else:
-            if 'ignore_files' in recurse and 'ignore_dirs' in recurse:
+            ret['comment'] = '{0}'.format(exc)
+            # NOTE: Should this be enough to stop the whole check altogether?
+    if recurse_set:
+        if 'user' in recurse_set:
+            if user:
+                uid = __salt__['file.user_to_uid'](user)
+                # file.user_to_uid returns '' if user does not exist. Above
+                # check for user is not fatal, so we need to be sure user
+                # exists.
+                if isinstance(uid, six.string_types):
+                    ret['result'] = False
+                    ret['comment'] = 'Failed to enforce ownership for ' \
+                                     'user {0} (user does not ' \
+                                     'exist)'.format(user)
+            else:
                 ret['result'] = False
-                ret['comment'] = 'Can not specify "recurse" options "ignore_files" ' \
-                                 'and "ignore_dirs" at the same time.'
-                return ret
-
-            if 'user' in recurse:
-                if user:
-                    uid = __salt__['file.user_to_uid'](user)
-                    # file.user_to_uid returns '' if user does not exist. Above
-                    # check for user is not fatal, so we need to be sure user
-                    # exists.
-                    if isinstance(uid, six.string_types):
-                        ret['result'] = False
-                        ret['comment'] = 'Failed to enforce ownership for ' \
-                                         'user {0} (user does not ' \
-                                         'exist)'.format(user)
-                else:
+                ret['comment'] = 'user not specified, but configured as ' \
+                                 'a target for recursive ownership ' \
+                                 'management'
+        else:
+            user = None
+        if 'group' in recurse_set:
+            if group:
+                gid = __salt__['file.group_to_gid'](group)
+                # As above with user, we need to make sure group exists.
+                if isinstance(gid, six.string_types):
                     ret['result'] = False
-                    ret['comment'] = 'user not specified, but configured as ' \
-                                     'a target for recursive ownership ' \
-                                     'management'
+                    ret['comment'] = 'Failed to enforce group ownership ' \
+                                     'for group {0}'.format(group)
             else:
-                user = None
-            if 'group' in recurse:
-                if group:
-                    gid = __salt__['file.group_to_gid'](group)
-                    # As above with user, we need to make sure group exists.
-                    if isinstance(gid, six.string_types):
-                        ret['result'] = False
-                        ret['comment'] = 'Failed to enforce group ownership ' \
-                                         'for group {0}'.format(group)
-                else:
-                    ret['result'] = False
-                    ret['comment'] = 'group not specified, but configured ' \
-                                     'as a target for recursive ownership ' \
-                                     'management'
-            else:
-                group = None
+                ret['result'] = False
+                ret['comment'] = 'group not specified, but configured ' \
+                                 'as a target for recursive ownership ' \
+                                 'management'
+        else:
+            group = None
 
-            if 'mode' not in recurse:
-                file_mode = None
-                dir_mode = None
+        if 'mode' not in recurse_set:
+            file_mode = None
+            dir_mode = None
 
-            if 'ignore_files' in recurse:
-                ignore_files = True
-            else:
-                ignore_files = False
+        check_files = 'ignore_files' not in recurse_set
+        check_dirs = 'ignore_dirs' not in recurse_set
 
-            if 'ignore_dirs' in recurse:
-                ignore_dirs = True
-            else:
-                ignore_dirs = False
-
-            for root, dirs, files in walk_l:
-                if not ignore_files:
-                    for fn_ in files:
-                        full = os.path.join(root, fn_)
-                        ret, perms = __salt__['file.check_perms'](
-                            full,
-                            ret,
-                            user,
-                            group,
-                            file_mode,
-                            follow_symlinks)
-                if not ignore_dirs:
-                    for dir_ in dirs:
-                        full = os.path.join(root, dir_)
-                        ret, perms = __salt__['file.check_perms'](
-                            full,
-                            ret,
-                            user,
-                            group,
-                            dir_mode,
-                            follow_symlinks)
+        for root, dirs, files in walk_l:
+            if check_files:
+                for fn_ in files:
+                    full = os.path.join(root, fn_)
+                    ret, perms = __salt__['file.check_perms'](
+                        full,
+                        ret,
+                        user,
+                        group,
+                        file_mode,
+                        follow_symlinks)
+            if check_dirs:
+                for dir_ in dirs:
+                    full = os.path.join(root, dir_)
+                    ret, perms = __salt__['file.check_perms'](
+                        full,
+                        ret,
+                        user,
+                        group,
+                        dir_mode,
+                        follow_symlinks)
 
     if clean:
         keep = _gen_keep_files(name, require, walk_d)
@@ -2109,7 +2246,7 @@ def recurse(name,
         recursively removed so that symlink creation can proceed. This
         option is usually not needed except in special circumstances.
     '''
-    name = os.path.expanduser(name)
+    name = os.path.expanduser(sdecode(name))
 
     user = _test_owner(kwargs, user=user)
     if salt.utils.is_windows():
@@ -2231,7 +2368,7 @@ def recurse(name,
                 merge_ret(path, _ret)
                 return
             else:
-                shutil.rmtree(path)
+                __salt__['file.remove'](path)
                 _ret['changes'] = {'diff': 'Replaced directory with a '
                                            'new file'}
                 merge_ret(path, _ret)
@@ -2347,7 +2484,7 @@ def recurse(name,
         # the file to copy from; it is either a normal file or an
         # empty dir(if include_empty==true).
 
-        relname = os.path.relpath(fn_, srcpath)
+        relname = sdecode(os.path.relpath(fn_, srcpath))
         if relname.startswith('..'):
             continue
 
@@ -2444,7 +2581,7 @@ def line(name, content, match=None, mode=None, location=None,
 
     .. code-block: yaml
 
-       /etc/myconfig.conf
+       /etc/myconfig.conf:
          file.line:
            - mode: ensure
            - content: my key = my value
@@ -2463,14 +2600,15 @@ def line(name, content, match=None, mode=None, location=None,
     if not check_res:
         return _error(ret, check_msg)
 
-    changes = __salt__['file.line'](name, content, match=match, mode=mode, location=location,
-                                    before=before, after=after, show_changes=show_changes,
-                                    backup=backup, quiet=quiet, indent=indent)
+    changes = __salt__['file.line'](
+        name, content, match=match, mode=mode, location=location,
+        before=before, after=after, show_changes=show_changes,
+        backup=backup, quiet=quiet, indent=indent)
     if changes:
         ret['pchanges']['diff'] = changes
         if __opts__['test']:
             ret['result'] = None
-            ret['comment'] = 'Changes would have been made:\ndiff:\n{0}'.format(changes)
+            ret['comment'] = 'Changes would be made:\ndiff:\n{0}'.format(changes)
         else:
             ret['result'] = True
             ret['comment'] = 'Changes were made'
@@ -2502,10 +2640,11 @@ def replace(name,
         Filesystem path to the file to be edited.
 
     pattern
-        Python's `regular expression search <https://docs.python.org/2/library/re.html>`_.
+        A regular expression, to be matched using Python's
+        :py:func:`~re.search`.
 
     repl
-        The replacement text.
+        The replacement text
 
     count
         Maximum number of pattern occurrences to be replaced.  Defaults to 0.
@@ -2526,36 +2665,43 @@ def replace(name,
         specified which will read the entire file into memory before
         processing.
 
-    append_if_not_found
-        If pattern is not found and set to ``True`` then, the content will be appended to the file.
+    append_if_not_found : False
+        If set to ``True``, and pattern is not found, then the content will be
+        appended to the file.
 
         .. versionadded:: 2014.7.0
 
-    prepend_if_not_found
-        If pattern is not found and set to ``True`` then, the content will be prepended to the file.
+    prepend_if_not_found : False
+        If set to ``True`` and pattern is not found, then the content will be
+        prepended to the file.
 
         .. versionadded:: 2014.7.0
 
     not_found_content
-        Content to use for append/prepend if not found. If ``None`` (default), uses ``repl``. Useful
-        when ``repl``  uses references to group in pattern.
+        Content to use for append/prepend if not found. If ``None`` (default),
+        uses ``repl``. Useful when ``repl`` uses references to group in
+        pattern.
 
         .. versionadded:: 2014.7.0
 
     backup
-        The file extension to use for a backup of the file before editing. Set to ``False`` to skip
-        making a backup.
+        The file extension to use for a backup of the file before editing. Set
+        to ``False`` to skip making a backup.
 
-    show_changes
-        Output a unified diff of the old file and the new file. If ``False`` return a boolean if any
-        changes were made. Returns a boolean or a string.
+    show_changes : True
+        Output a unified diff of the old file and the new file. If ``False``
+        return a boolean if any changes were made. Returns a boolean or a
+        string.
 
         .. note:
-            Using this option will store two copies of the file in-memory (the original version and
-            the edited version) in order to generate the diff.
+            Using this option will store two copies of the file in memory (the
+            original version and the edited version) in order to generate the
+            diff. This may not normally be a concern, but could impact
+            performance if used with large files.
 
-    For complex regex patterns it can be useful to avoid the need for complex quoting and escape
-    sequences by making use of YAML's multiline string syntax.
+    For complex regex patterns, it can be useful to avoid the need for complex
+    quoting and escape sequences by making use of YAML's multiline string
+    syntax.
 
     .. code-block:: yaml
 
@@ -3117,7 +3263,8 @@ def append(name,
            sources=None,
            source_hashes=None,
            defaults=None,
-           context=None):
+           context=None,
+           ignore_whitespace=True):
     '''
     Ensure that some text appears at the end of a file.
 
@@ -3220,6 +3367,13 @@ def append(name,
     context
         Overrides default context variables passed to the template.
 
+    ignore_whitespace
+        .. versionadded:: 2015.8.4
+
+        Spaces and Tabs in text are ignored by default, when searching for the
+        appending content, one space or multiple tabs are the same for salt.
+        Set this option to ``False`` if you want to change this behavior.
+
     Multi-line example:
 
     .. code-block:: yaml
@@ -3321,10 +3475,15 @@ def append(name,
 
     try:
         for chunk in text:
-
-            if __salt__['file.search'](
+            if ignore_whitespace:
+                if __salt__['file.search'](
                     name,
                     salt.utils.build_whitespace_split_regex(chunk),
+                    multiline=True):
+                    continue
+            elif __salt__['file.search'](
+                    name,
+                    chunk,
                     multiline=True):
                 continue
 
@@ -3557,7 +3716,7 @@ def patch(name,
           env=None,
           **kwargs):
     '''
-    Apply a patch to a file.
+    Apply a patch to a file or directory.
 
     .. note::
 
@@ -3565,7 +3724,7 @@ def patch(name,
         using this state function.
 
     name
-        The file to with the patch will be applied.
+        The file or directory to which the patch will be applied.
 
     source
         The source patch to download to the minion, this source file must be
@@ -3613,7 +3772,7 @@ def patch(name,
     if hash is None:
         return _error(ret, 'Hash is required')
 
-    if __salt__['file.check_hash'](name, hash):
+    if hash and __salt__['file.check_hash'](name, hash):
         ret.update(result=True, comment='Patch is already applied')
         return ret
 
@@ -3656,7 +3815,7 @@ def patch(name,
         name, cached_source_path, options=options
     )
     ret['result'] = not ret['changes']['retcode']
-    if ret['result'] and not __salt__['file.check_hash'](name, hash):
+    if ret['result'] and hash and not __salt__['file.check_hash'](name, hash):
         ret.update(
             result=False,
             comment='File {0} hash mismatch after patch was applied'.format(
@@ -3771,7 +3930,7 @@ def copy(
         .. versionadded:: 2015.5.0
 
         Set ``preserve: True`` to preserve user/group ownership and mode
-        after copying. Default is ``False``. If ``preseve`` is set to ``True``,
+        after copying. Default is ``False``. If ``preserve`` is set to ``True``,
         then user/group/mode attributes will be ignored.
 
     user
@@ -3866,12 +4025,7 @@ def copy(
         elif not __opts__['test'] and changed:
             # Remove the destination to prevent problems later
             try:
-                if os.path.islink(name):
-                    os.unlink(name)
-                elif os.path.isfile(name):
-                    os.remove(name)
-                else:
-                    shutil.rmtree(name)
+                __salt__['file.remove'](name)
             except (IOError, OSError):
                 return _error(
                     ret,
@@ -3971,12 +4125,7 @@ def rename(name, source, force=False, makedirs=False):
         elif not __opts__['test']:
             # Remove the destination to prevent problems later
             try:
-                if os.path.islink(name):
-                    os.unlink(name)
-                elif os.path.isfile(name):
-                    os.remove(name)
-                else:
-                    shutil.rmtree(name)
+                __salt__['file.remove'](name)
             except (IOError, OSError):
                 return _error(
                     ret,
@@ -4143,7 +4292,7 @@ def _merge_dict(obj, k, v):
                         for x, y in six.iteritems(updates):
                             changes[k + "." + x] = y
                     else:
-                        if obj[k][a] != b:
+                        if a not in obj[k] or obj[k][a] != b:
                             changes[k + "." + a] = b
                             obj[k][a] = b
             else:
@@ -4293,7 +4442,7 @@ def serialize(name,
 
     formatter = kwargs.pop('formatter', 'yaml').lower()
 
-    if len([_f for _f in [dataset, dataset_pillar] if _f]) > 1:
+    if len([x for x in (dataset, dataset_pillar) if x]) > 1:
         return _error(
             ret, 'Only one of \'dataset\' and \'dataset_pillar\' is permitted')
 
@@ -4304,49 +4453,39 @@ def serialize(name,
         return _error(
             ret, 'Neither \'dataset\' nor \'dataset_pillar\' was defined')
 
-    if merge_if_exists:
-        if os.path.isfile(name):
-            if formatter == 'yaml':
-                with salt.utils.fopen(name, 'r') as fhr:
-                    existing_data = yaml.safe_load(fhr)
-            elif formatter == 'json':
-                with salt.utils.fopen(name, 'r') as fhr:
-                    existing_data = json.load(fhr)
-            else:
-                return {'changes': {},
-                        'comment': ('{0} format is not supported for merging'
-                                    .format(formatter.capitalize())),
-                        'name': name,
-                        'result': False}
-
-            if existing_data is not None:
-                for k, v in six.iteritems(dataset):
-                    if k in existing_data:
-                        ret['changes'].update(_merge_dict(existing_data, k, v))
-                    else:
-                        ret['changes'][k] = v
-                        existing_data[k] = v
-                dataset = existing_data
-
-    if formatter == 'yaml':
-        contents = yaml_serializer.serialize(dataset,
-                                             default_flow_style=False)
-    elif formatter == 'json':
-        contents = json_serializer.serialize(dataset,
-                                             indent=2,
-                                             separators=(',', ': '),
-                                             sort_keys=True)
-    elif formatter == 'python':
-        # round-trip this through JSON to avoid OrderedDict types
-        # there's probably a more performant way to do this...
-        # TODO remove json round-trip when all dataset will use
-        # serializers
-        contents = pprint.pformat(
-            json.loads(
-                json.dumps(dataset),
-                object_hook=salt.utils.decode_dict
+    if salt.utils.is_windows():
+        if group is not None:
+            log.warning(
+                'The group argument for {0} has been ignored as this '
+                'is a Windows system.'.format(name)
             )
-        )
+        group = user
+
+    serializer_name = '{0}.serialize'.format(formatter)
+    if serializer_name in __serializers__:
+        serializer = __serializers__[serializer_name]
+        if merge_if_exists:
+            if os.path.isfile(name):
+                if '{0}.deserialize'.format(formatter) in __serializers__:
+                    with salt.utils.fopen(name, 'r') as fhr:
+                        existing_data = serializer.deserialize(fhr)
+                else:
+                    return {'changes': {},
+                            'comment': ('{0} format is not supported for merging'
+                                        .format(formatter.capitalize())),
+                            'name': name,
+                            'result': False}
+
+                if existing_data is not None:
+                    for k, v in six.iteritems(dataset):
+                        if k in existing_data:
+                            ret['changes'].update(_merge_dict(existing_data, k, v))
+                        else:
+                            ret['changes'][k] = v
+                            existing_data[k] = v
+                    dataset = existing_data
+
+        contents = __serializers__[serializer_name](dataset)
     else:
         return {'changes': {},
                 'comment': '{0} format is not supported'.format(

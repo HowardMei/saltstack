@@ -33,7 +33,17 @@ config:
     myprofile:
         keyid: GKTADJGHEIQSXMKKRBJ08H
         key: askdjghsdfjkghWupUjasdflkdfklgjsdfjajkghs
-            region: us-east-1
+        region: us-east-1
+
+.. code-block:: yaml
+
+    aws:
+        region:
+            us-east-1:
+                profile:
+                    keyid: GKTADJGHEIQSXMKKRBJ08H
+                    key: askdjghsdfjkghWupUjasdflkdfklgjsdfjajkghs
+                    region: us-east-1
 
 .. code-block:: yaml
 
@@ -52,16 +62,14 @@ config:
             - vpc_id: vpc-123456
             - cidr_block: 10.0.0.0/16
             - region: us-east-1
-            - keyid: GKTADJGHEIQSXMKKRBJ08H
-            - key: askdjghsdfjkghWupUjasdflkdfklgjsdfjajkghs
+            - profile: myprofile
 
+    {% set profile = salt['pillar.get']('aws:region:us-east-1:profile' ) %}
     Ensure internet gateway exists:
         boto_vpc.internet_gateway_present:
             - name: myigw
             - vpc_name: myvpc
-            - region: us-east-1
-            - keyid: GKTADJGHEIQSXMKKRBJ08H
-            - key: askdjghsdfjkghWupUjasdflkdfklgjsdfjajkghs
+            - profile: {{ profile }}
 
     Ensure route table exists:
         boto_vpc.route_table_present:
@@ -70,13 +78,13 @@ config:
             - routes:
               - destination_cidr_block: 0.0.0.0/0
                 instance_id: i-123456
-                interface_id: eni-123456
-            - subnets:
-              - name: subnet1
-              - name: subnet2
+            - subnet_names:
+              - subnet1
+              - subnet2
             - region: us-east-1
-            - keyid: GKTADJGHEIQSXMKKRBJ08H
-            - key: askdjghsdfjkghWupUjasdflkdfklgjsdfjajkghs
+            - profile:
+                keyid: GKTADJGHEIQSXMKKRBJ08H
+                key: askdjghsdfjkghWupUjasdflkdfklgjsdfjajkghs
 '''
 
 # Import Python Libs
@@ -154,14 +162,15 @@ def present(name, cidr_block, instance_tenancy=None, dns_support=None,
             ret['comment'] = 'VPC {0} is set to be created.'.format(name)
             ret['result'] = None
             return ret
-        r = __salt__['boto_vpc.create'](cidr_block, instance_tenancy,
-                                        name, dns_support, dns_hostnames,
-                                        tags, region, key, keyid, profile)
+        r = __salt__['boto_vpc.create'](cidr_block, instance_tenancy=instance_tenancy, vpc_name=name,
+                                        enable_dns_support=dns_support, enable_dns_hostnames=dns_hostnames,
+                                        tags=tags, region=region, key=key, keyid=keyid,
+                                        profile=profile)
         if not r.get('created'):
             ret['result'] = False
             ret['comment'] = 'Failed to create VPC: {0}.'.format(r['error']['message'])
             return ret
-        _describe = __salt__['boto_vpc.describe'](r['id'], region=region, key=key,
+        _describe = __salt__['boto_vpc.describe'](vpc_id=r['id'], region=region, key=key,
                                                   keyid=keyid, profile=profile)
         ret['changes']['old'] = {'vpc': None}
         ret['changes']['new'] = _describe
@@ -217,7 +226,7 @@ def absent(name, tags=None, region=None, key=None, keyid=None, profile=None):
         ret['comment'] = 'VPC {0} is set to be removed.'.format(name)
         ret['result'] = None
         return ret
-    r = __salt__['boto_vpc.delete'](name=name, tags=tags,
+    r = __salt__['boto_vpc.delete'](vpc_name=name, tags=tags,
                                     region=region, key=key,
                                     keyid=keyid, profile=profile)
     if not r['deleted']:
@@ -495,7 +504,7 @@ def subnet_present(name, cidr_block, vpc_name=None, vpc_id=None,
             ret['result'] = False
             ret['comment'] = 'Failed to create subnet: {0}'.format(r['error']['message'])
             return ret
-        _describe = __salt__['boto_vpc.describe_subnet'](r['id'], region=region, key=key,
+        _describe = __salt__['boto_vpc.describe_subnet'](subnet_id=r['id'], region=region, key=key,
                                                          keyid=keyid, profile=profile)
         ret['changes']['old'] = {'subnet': None}
         ret['changes']['new'] = _describe
@@ -703,8 +712,7 @@ def route_table_present(name, vpc_name=None, vpc_id=None, routes=None,
     '''
     Ensure route table with routes exists and is associated to a VPC.
 
-
-    Example::
+    Example:
 
     .. code-block:: yaml
 
@@ -713,8 +721,13 @@ def route_table_present(name, vpc_name=None, vpc_id=None, routes=None,
             - vpc_id: vpc-123456
             - routes:
               - destination_cidr_block: 0.0.0.0/0
+                internet_gateway_name: InternetGateway
+              - destination_cidr_block: 10.10.11.0/24
                 instance_id: i-123456
+              - destination_cidr_block: 10.10.12.0/24
                 interface_id: eni-123456
+              - destination_cidr_block: 10.10.13.0/24
+                instance_name: mygatewayserver
             - subnet_names:
               - subnet1
               - subnet2
@@ -730,7 +743,7 @@ def route_table_present(name, vpc_name=None, vpc_id=None, routes=None,
         Either vpc_name or vpc_id must be provided.
 
     routes
-        A list of routes.
+        A list of routes.  Each route has a cidr and a target.
 
     subnet_ids
         A list of subnet ids to associate

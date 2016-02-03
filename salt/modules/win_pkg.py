@@ -9,6 +9,7 @@ import errno
 import os
 import locale
 import logging
+import time
 from distutils.version import LooseVersion  # pylint: disable=import-error,no-name-in-module
 
 # Import third party libs
@@ -24,7 +25,6 @@ try:
 except ImportError:
     import msgpack_pure as msgpack
 # pylint: enable=import-error
-import shlex
 
 # Import salt libs
 from salt.exceptions import CommandExecutionError, SaltRenderError
@@ -44,7 +44,7 @@ def __virtual__():
     '''
     if salt.utils.is_windows() and HAS_DEPENDENCIES:
         return __virtualname__
-    return False
+    return (False, "Module win_pkg: module only works on Windows systems")
 
 
 def latest_version(*names, **kwargs):
@@ -523,6 +523,7 @@ def install(name=None, refresh=False, pkgs=None, saltenv='base', **kwargs):
         directories on ``salt://``
 
     :return: Return a dict containing the new package names and versions::
+
     :rtype: dict
 
         If the package is installed by ``pkg.install``:
@@ -532,11 +533,13 @@ def install(name=None, refresh=False, pkgs=None, saltenv='base', **kwargs):
             {'<package>': {'old': '<old-version>',
                            'new': '<new-version>'}}
 
+
         If the package is already installed:
 
         .. code-block:: cfg
 
             {'<package>': {'current': '<current-version>'}}
+
 
     The following example will refresh the winrepo and install a single package,
     7zip.
@@ -742,10 +745,10 @@ def install(name=None, refresh=False, pkgs=None, saltenv='base', **kwargs):
                 arguments = ['/i', cached_pkg]
                 if pkginfo['version_num'].get('allusers', True):
                     arguments.append('ALLUSERS="1"')
-                arguments.extend(shlex.split(install_flags))
+                arguments.extend(salt.utils.shlex_split(install_flags))
             else:
                 cmd = cached_pkg
-                arguments = shlex.split(install_flags)
+                arguments = salt.utils.shlex_split(install_flags)
 
             # Create Scheduled Task
             __salt__['task.create_task'](name='update-salt-software',
@@ -769,7 +772,7 @@ def install(name=None, refresh=False, pkgs=None, saltenv='base', **kwargs):
                     cmd.append('ALLUSERS="1"')
             else:
                 cmd.append(cached_pkg)
-            cmd.extend(shlex.split(install_flags))
+            cmd.extend(salt.utils.shlex_split(install_flags))
             # Launch the command
             result = __salt__['cmd.run_stdout'](cmd,
                                                 cache_path,
@@ -786,11 +789,13 @@ def install(name=None, refresh=False, pkgs=None, saltenv='base', **kwargs):
     new = list_pkgs()
     tries = 0
     difference = salt.utils.compare_dicts(old, new)
-    while not all(name in difference for name in changed) and tries <= 1000:
+    while not all(name in difference for name in changed) and tries < 10:
+        time.sleep(3)
         new = list_pkgs()
         difference = salt.utils.compare_dicts(old, new)
         tries += 1
-        if tries == 1000:
+        log.debug("Try {0}".format(tries))
+        if tries == 10:
             ret['_comment'] = 'Registry not updated.'
 
     # Compare the software list before and after
@@ -963,10 +968,10 @@ def remove(name=None, pkgs=None, version=None, **kwargs):
             if pkginfo[version_num].get('msiexec'):
                 cmd = 'msiexec.exe'
                 arguments = ['/x']
-                arguments.extend(shlex.split(uninstall_flags))
+                arguments.extend(salt.utils.shlex_split(uninstall_flags))
             else:
                 cmd = expanded_cached_pkg
-                arguments = shlex.split(uninstall_flags)
+                arguments = salt.utils.shlex_split(uninstall_flags)
 
             # Create Scheduled Task
             __salt__['task.create_task'](name='update-salt-software',
@@ -988,7 +993,7 @@ def remove(name=None, pkgs=None, version=None, **kwargs):
                 cmd.extend(['msiexec', '/x', expanded_cached_pkg])
             else:
                 cmd.append(expanded_cached_pkg)
-            cmd.extend(shlex.split(uninstall_flags))
+            cmd.extend(salt.utils.shlex_split(uninstall_flags))
             # Launch the command
             result = __salt__['cmd.run_stdout'](cmd,
                                                 output_loglevel='trace',

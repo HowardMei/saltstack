@@ -96,7 +96,9 @@ def list_present(name, value, delimiter=DEFAULT_TARGET_DELIM):
     '''
     .. versionadded:: 2014.1.0
 
-    Ensure the value is present in the list type grain.
+    Ensure the value is present in the list-type grain. Note: If the grain that is
+    provided in ``name`` is not present on the system, this new grain will be created
+    with the corresponding provided value.
 
     name
         The grain name.
@@ -132,7 +134,7 @@ def list_present(name, value, delimiter=DEFAULT_TARGET_DELIM):
            'changes': {},
            'result': True,
            'comment': ''}
-    grain = __grains__.get(name)
+    grain = __salt__['grains.get'](name)
 
     if grain:
         # check whether grain is a list
@@ -141,7 +143,7 @@ def list_present(name, value, delimiter=DEFAULT_TARGET_DELIM):
             ret['comment'] = 'Grain {0} is not a valid list'.format(name)
             return ret
         if isinstance(value, list):
-            if set(value).issubset(set(__grains__.get(name))):
+            if set(value).issubset(set(__salt__['grains.get'](name))):
                 ret['comment'] = 'Value {1} is already in grain {0}'.format(name, value)
                 return ret
         else:
@@ -161,7 +163,7 @@ def list_present(name, value, delimiter=DEFAULT_TARGET_DELIM):
         return ret
     new_grains = __salt__['grains.append'](name, value)
     if isinstance(value, list):
-        if not set(value).issubset(set(__grains__.get(name))):
+        if not set(value).issubset(set(__salt__['grains.get'](name))):
             ret['result'] = False
             ret['comment'] = 'Failed append value {1} to grain {0}'.format(name, value)
             return ret
@@ -338,7 +340,8 @@ def append(name, value, convert=False,
     '''
     .. versionadded:: 2014.7.0
 
-    Append a value to a list in the grains config file
+    Append a value to a list in the grains config file. The grain that is being
+    appended to (name) must exist before the new value can be added.
 
     name
         The grain name

@@ -327,6 +327,7 @@ def pillars(opts, functions, context=None):
         tag='pillar',
         pack={'__salt__': functions, '__context__': context},
     )
+    ret.pack['__ext_pillar__'] = ret
     return FilterDictWrapper(ret, '.ext_pillar')
 
 
@@ -429,7 +430,7 @@ def roster(opts, whitelist=None):
     )
 
 
-def states(opts, functions, utils, whitelist=None):
+def states(opts, functions, utils, serializers, whitelist=None):
     '''
     Returns the state modules
 
@@ -454,6 +455,7 @@ def states(opts, functions, utils, whitelist=None):
     )
     ret.pack['__states__'] = ret
     ret.pack['__utils__'] = utils
+    ret.pack['__serializers__'] = serializers
     return ret
 
 
@@ -492,7 +494,7 @@ def search(opts, returners, whitelist=None):
     )
 
 
-def log_handlers(opts):
+def log_handlers(opts, functions=None, grains=None):
     '''
     Returns the custom logging handler modules
 
@@ -508,6 +510,7 @@ def log_handlers(opts):
         ),
         opts,
         tag='log_handlers',
+        pack={'__salt__': functions, '__grains__': grains}
     )
     return FilterDictWrapper(ret, '.setup_handlers')
 
@@ -629,6 +632,7 @@ def grains(opts, force_refresh=False, proxy=None):
 
     if opts.get('skip_grains', False):
         return {}
+    grains_deep_merge = opts.get('grains_deep_merge', False) is True
     if 'conf_file' in opts:
         pre_opts = {}
         pre_opts.update(salt.config.load_config(
@@ -664,7 +668,10 @@ def grains(opts, force_refresh=False, proxy=None):
         ret = fun()
         if not isinstance(ret, dict):
             continue
-        grains_data.update(ret)
+        if grains_deep_merge:
+            salt.utils.dictupdate.update(grains_data, ret)
+        else:
+            grains_data.update(ret)
 
     # Run the rest of the grains
     for key, fun in six.iteritems(funcs):
@@ -683,8 +690,12 @@ def grains(opts, force_refresh=False, proxy=None):
             continue
         if not isinstance(ret, dict):
             continue
-        grains_data.update(ret)
+        if grains_deep_merge:
+            salt.utils.dictupdate.update(grains_data, ret)
+        else:
+            grains_data.update(ret)
 
+    grains_data.update(opts['grains'])
     # Write cache if enabled
     if opts.get('grains_cache', False):
         cumask = os.umask(0o77)
@@ -704,7 +715,10 @@ def grains(opts, force_refresh=False, proxy=None):
             log.error(msg.format(cfn))
         os.umask(cumask)
 
-    grains_data.update(opts['grains'])
+    if grains_deep_merge:
+        salt.utils.dictupdate.update(grains_data, opts['grains'])
+    else:
+        grains_data.update(opts['grains'])
     return grains_data
 
 
@@ -1300,10 +1314,10 @@ class LazyLoader(salt.utils.lazy.LazyDict):
         # containing the names of the proxy types that the module supports.
         #
         # Render modules and state modules are OK though
-        if 'proxymodule' in self.opts:
-            if self.tag not in ['render', 'states', 'utils']:
+        if 'proxy' in self.opts:
+            if self.tag in ['grains', 'proxy']:
                 if not hasattr(mod, '__proxyenabled__') or \
-                        (self.opts['proxymodule'].loaded_base_name not in mod.__proxyenabled__ and
+                        (self.opts['proxy']['proxytype'] not in mod.__proxyenabled__ and
                             '*' not in mod.__proxyenabled__):
                     err_string = 'not a proxy_minion enabled module'
                     self.missing_modules[module_name] = err_string
@@ -1443,28 +1457,23 @@ class LazyLoader(salt.utils.lazy.LazyDict):
         try:
             error_reason = None
             if hasattr(mod, '__virtual__') and inspect.isfunction(mod.__virtual__):
-                if self.opts.get('virtual_timer', False):
+                try:
                     start = time.time()
                     virtual = mod.__virtual__()
                     if isinstance(virtual, tuple):
                         error_reason = virtual[1]
                         virtual = virtual[0]
-                    end = time.time() - start
-                    msg = 'Virtual function took {0} seconds for {1}'.format(
-                            end, module_name)
-                    log.warning(msg)
-                else:
-                    try:
-                        virtual = mod.__virtual__()
-                        if isinstance(virtual, tuple):
-                            error_reason = virtual[1]
-                            virtual = virtual[0]
-                    except Exception as exc:
-                        log.error('Exception raised when processing __virtual__ function'
-                                  ' for {0}. Module will not be loaded: {1}'.format(
-                                      module_name, exc),
-                                  exc_info_on_loglevel=logging.DEBUG)
-                        virtual = None
+                    if self.opts.get('virtual_timer', False):
+                        end = time.time() - start
+                        msg = 'Virtual function took {0} seconds for {1}'.format(
+                                end, module_name)
+                        log.warning(msg)
+                except Exception as exc:
+                    error_reason = ('Exception raised when processing __virtual__ function'
+                              ' for {0}. Module will not be loaded {1}'.format(
+                                  module_name, exc))
+                    log.error(error_reason, exc_info_on_loglevel=logging.DEBUG)
+                    virtual = None
                 # Get the module's virtual name
                 virtualname = getattr(mod, '__virtualname__', virtual)
                 if not virtual:

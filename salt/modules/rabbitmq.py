@@ -63,25 +63,27 @@ def _get_rabbitmq_plugin():
     return rabbitmq
 
 
+def _safe_output(line):
+    '''
+    Looks for rabbitmqctl warning, or general formatting, strings that aren't
+    intended to be parsed as output.
+    Returns a boolean whether the line can be parsed as rabbitmqctl output.
+    '''
+    return not any([
+        line.startswith('Listing') and line.endswith('...'),
+        '...done' in line,
+        line.startswith('WARNING:')
+    ])
+
+
 def _strip_listing_to_done(output_list):
-    '''Conditionally remove non-relevant first and last line,
+    '''
+    Conditionally remove non-relevant first and last line,
     "Listing ..." - "...done".
     outputlist: rabbitmq command output split by newline
     return value: list, conditionally modified, may be empty.
     '''
-
-    # conditionally remove non-relevant first line
-    f_line = ''.join(output_list[:1])
-    if f_line.startswith('Listing') and f_line.endswith('...'):
-        output_list.pop(0)
-
-    # some versions of rabbitmq have no trailing '...done' line,
-    # which some versions do not output.
-    l_line = ''.join(output_list[-1:])
-    if '...done' in l_line:
-        output_list.pop()
-
-    return output_list
+    return [line for line in output_list if _safe_output(line)]
 
 
 def _output_to_dict(cmdoutput, values_mapper=None):
@@ -136,13 +138,9 @@ def list_vhosts(runas=None):
     '''
     if runas is None:
         runas = salt.utils.get_user()
-    res = __salt__['cmd.run'](
-        ['rabbitmqctl', 'list_vhosts'],
-        runas=runas,
-        python_shell=False)
-
-    # remove first and last line: Listing ... - ...done
-    return _strip_listing_to_done(res.splitlines())
+    res = __salt__['cmd.run']('rabbitmqctl list_vhosts -q',
+                              runas=runas).splitlines()
+    return res
 
 
 def user_exists(name, runas=None):
@@ -281,6 +279,42 @@ def clear_password(name, runas=None):
     msg = 'Password Cleared'
 
     return _format_response(res, msg)
+
+
+def check_password(name, password, runas=None):
+    '''
+    .. versionadded:: Boron
+
+    Checks if a user's password is valid.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' rabbitmq.check_password rabbit_user password
+    '''
+    if runas is None:
+        runas = salt.utils.get_user()
+
+    cmd = ('rabbit_auth_backend_internal:check_user_login'
+        '(<<"{0}">>, [{{password, <<"{1}">>}}]).').format(
+        name.replace('"', '\\"'),
+        password.replace('"', '\\"'))
+
+    res = __salt__['cmd.run'](
+        ['rabbitmqctl', 'eval', cmd],
+        runas=runas,
+        output_loglevel='quiet',
+        python_shell=False)
+    msg = 'password-check'
+
+    _response = _format_response(res, msg)
+    _key = _response.keys()[0]
+
+    if 'invalid credentials' in _response[_key]:
+        return False
+
+    return True
 
 
 def add_vhost(vhost, runas=None):
